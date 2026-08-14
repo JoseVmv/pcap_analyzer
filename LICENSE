@@ -1,0 +1,124 @@
+Copyright (c) 2026 Josevmv. Todos os direitos reservados. / All rights reserved.
+
+================================================================================
+PORTUGUÊS
+================================================================================
+
+LICENÇA PROPRIETÁRIA — CÓDIGO VISÍVEL, USO RESTRITO
+
+Este software e sua documentação ("o Software") são de propriedade exclusiva do
+titular do copyright acima identificado e estão protegidos pela Lei nº 9.610/98
+(Direitos Autorais), pela Lei nº 9.609/98 (Programas de Computador) e por
+tratados internacionais.
+
+1. PERMITIDO
+
+   a) Visualizar e ler o código-fonte publicado neste repositório;
+   b) Executar o Software localmente, sem modificações, para fins pessoais de
+      estudo e avaliação.
+
+2. PROIBIDO SEM AUTORIZAÇÃO PRÉVIA E POR ESCRITO DO TITULAR
+
+   a) Copiar, reproduzir ou republicar o Software, no todo ou em parte;
+   b) Distribuir, sublicenciar, vender, alugar ou ceder o Software;
+   c) Modificar, adaptar, traduzir ou criar obras derivadas;
+   d) Realizar engenharia reversa, descompilar ou desmontar o Software;
+   e) Incorporar o Software, ou qualquer parte dele, em outro produto ou
+      serviço, comercial ou não;
+   f) Utilizar o Software para prestação de serviços a terceiros;
+   g) Remover ou alterar avisos de copyright, autoria ou esta licença.
+
+3. AUTORIZAÇÃO
+
+   Solicitações de autorização devem ser dirigidas ao titular do copyright
+   através do repositório oficial: https://github.com/Josevmv
+
+   Qualquer autorização concedida deve ser expressa, por escrito, e limita-se
+   estritamente aos termos nela descritos.
+
+4. COMPONENTES DE TERCEIROS
+
+   O Software depende de bibliotecas de terceiros que NÃO são cobertas por esta
+   licença e permanecem sujeitas às suas próprias licenças originais:
+
+     - Scapy ...... GPL-2.0-only ....... https://github.com/secdev/scapy
+     - Jinja2 ..... BSD-3-Clause ....... https://github.com/pallets/jinja
+
+   Esta licença aplica-se exclusivamente ao código original de autoria do
+   titular, contido no diretório investigator/ e demais arquivos deste
+   repositório.
+
+5. AUSÊNCIA DE GARANTIA
+
+   O SOFTWARE É FORNECIDO "NO ESTADO EM QUE SE ENCONTRA", SEM GARANTIA DE
+   QUALQUER NATUREZA, EXPRESSA OU IMPLÍCITA, INCLUINDO MAS NÃO SE LIMITANDO A
+   GARANTIAS DE COMERCIALIZAÇÃO, ADEQUAÇÃO A UMA FINALIDADE ESPECÍFICA E NÃO
+   VIOLAÇÃO. EM NENHUMA HIPÓTESE O TITULAR SERÁ RESPONSÁVEL POR QUAISQUER
+   REIVINDICAÇÕES, DANOS OU OUTRAS RESPONSABILIDADES DECORRENTES DO USO OU DA
+   IMPOSSIBILIDADE DE USO DO SOFTWARE.
+
+6. USO RESPONSÁVEL
+
+   O Software destina-se a atividades defensivas de segurança da informação.
+   O usuário é o único responsável por assegurar que possui autorização legal
+   para analisar as capturas de rede que submeter à ferramenta.
+
+================================================================================
+ENGLISH
+================================================================================
+
+PROPRIETARY LICENSE — SOURCE VISIBLE, USE RESTRICTED
+
+This software and its documentation ("the Software") are the exclusive property
+of the copyright holder identified above and are protected by Brazilian
+copyright law and international treaties.
+
+1. PERMITTED
+
+   a) Viewing and reading the source code published in this repository;
+   b) Running the Software locally, unmodified, for personal study and
+      evaluation purposes.
+
+2. PROHIBITED WITHOUT PRIOR WRITTEN AUTHORIZATION FROM THE COPYRIGHT HOLDER
+
+   a) Copying, reproducing or republishing the Software, in whole or in part;
+   b) Distributing, sublicensing, selling, renting or transferring it;
+   c) Modifying, adapting, translating or creating derivative works;
+   d) Reverse engineering, decompiling or disassembling it;
+   e) Incorporating the Software, or any part of it, into another product or
+      service, commercial or otherwise;
+   f) Using the Software to provide services to third parties;
+   g) Removing or altering copyright notices, authorship or this license.
+
+3. AUTHORIZATION
+
+   Requests must be directed to the copyright holder through the official
+   repository: https://github.com/Josevmv
+
+   Any authorization granted must be express, in writing, and is strictly
+   limited to the terms described therein.
+
+4. THIRD-PARTY COMPONENTS
+
+   The Software depends on third-party libraries which are NOT covered by this
+   license and remain subject to their own original licenses:
+
+     - Scapy ...... GPL-2.0-only ....... https://github.com/secdev/scapy
+     - Jinja2 ..... BSD-3-Clause ....... https://github.com/pallets/jinja
+
+   This license applies exclusively to the original code authored by the
+   copyright holder.
+
+5. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING
+   FROM THE USE OR INABILITY TO USE THE SOFTWARE.
+
+6. RESPONSIBLE USE
+
+   The Software is intended for defensive information-security activities. The
+   user is solely responsible for ensuring they have legal authorization to
+   analyze the network captures they submit to the tool.

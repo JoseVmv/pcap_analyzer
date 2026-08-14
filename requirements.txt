@@ -1,0 +1,6 @@
+# Runtime
+scapy>=2.5.0        # pcap/pcapng reading + packet dissection (pure Python, no tshark)
+jinja2>=3.1         # HTML report rendering, with autoescaping of capture-derived data
+
+# Development / tests
+pytest>=7.4

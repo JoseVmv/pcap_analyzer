@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Generated reports (keep the folder, ignore its contents)
+reports/*
+!reports/.gitkeep
+
+# Sample captures: reproducible from samples/make_*.py, so no binaries in git
+samples/*.pcap
+samples/*.pcapng
+
+# Captures under analysis. Real-world pcaps often carry live malware traffic
+# and third-party licensing, and they bloat git history permanently.
+# Keep them out of the repository; remove these lines only on purpose.
+*.pcap
+*.pcapng
+*.pcap.gz
+*.pcapng.gz
+*.etl

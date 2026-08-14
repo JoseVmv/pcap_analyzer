@@ -1,0 +1,411 @@
+{#
+  Investigation report template.
+
+  Rendered by Jinja2 with autoescaping ON.  That matters for security, not
+  just tidiness: this report embeds attacker-influenced strings taken
+  straight from the capture (DNS names, TLS SNI, HTTP URIs and User-Agents).
+  Without escaping, a crafted packet could inject markup into an analyst's
+  browser - the classic way an analysis tool becomes the victim.
+
+  The page is self-contained: no external CSS, JS, fonts or images, so it
+  opens correctly from an offline forensic workstation.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCAP Investigation - {{ capture.path|basename }}</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171d26; --panel-alt: #1d242f; --border: #2b3542;
+    --text: #e5e9f0; --muted: #9aa7b8; --accent: #58a6ff;
+    --crit: #ff5c5c; --high: #ff8352; --med: #f0c04a; --low: #59c9a5; --info: #7c8ba1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 0 4rem;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 2rem 2rem 1.5rem; background: linear-gradient(180deg,#1b2430,#0f1419);
+    border-bottom: 1px solid var(--border);
+  }
+  h1 { margin: 0 0 .25rem; font-size: 1.6rem; letter-spacing: .5px; }
+  h2 { font-size: 1.15rem; margin: 0 0 1rem; padding-bottom: .5rem;
+       border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1rem; margin: 1.2rem 0 .5rem; color: var(--accent); }
+  .sub { color: var(--muted); font-size: .9rem; }
+  main { max-width: 1180px; margin: 0 auto; padding: 0 1.5rem; }
+  section { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 10px; padding: 1.25rem 1.5rem; margin: 1.5rem 0; }
+  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--border);
+           vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase;
+       font-size: .72rem; letter-spacing: .6px; }
+  tbody tr:hover { background: var(--panel-alt); }
+  code, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+                font-size: .85em; }
+  .scroll { overflow-x: auto; }
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit,minmax(190px,1fr)); }
+  .stat { background: var(--panel-alt); border: 1px solid var(--border);
+          border-radius: 8px; padding: .8rem 1rem; }
+  .stat .label { color: var(--muted); font-size: .72rem; text-transform: uppercase;
+                 letter-spacing: .6px; }
+  .stat .value { font-size: 1.35rem; font-weight: 600; margin-top: .2rem; }
+  .badge { display: inline-block; padding: .1rem .5rem; border-radius: 4px;
+           font-size: .72rem; font-weight: 700; letter-spacing: .4px; color: #0f1419; }
+  .CRITICAL { background: var(--crit); } .HIGH { background: var(--high); }
+  .MEDIUM { background: var(--med); } .LOW { background: var(--low); }
+  .INFO { background: var(--info); }
+  .score-wrap { display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; }
+  .score { font-size: 3rem; font-weight: 700; line-height: 1; }
+  .bar { flex: 1; min-width: 220px; height: 12px; background: var(--panel-alt);
+         border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
+  .bar > div { height: 100%; background: linear-gradient(90deg,var(--low),var(--med),var(--crit)); }
+  .chain { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .5rem 0 1rem; }
+  .chain .step { background: var(--panel-alt); border: 1px solid var(--border);
+                 border-radius: 20px; padding: .3rem .9rem; font-size: .85rem; }
+  .chain .arrow { color: var(--accent); }
+  .finding { border-left: 3px solid var(--border); padding: .3rem 0 .3rem 1rem;
+             margin: 1rem 0; }
+  .finding.CRITICAL { border-left-color: var(--crit); }
+  .finding.HIGH { border-left-color: var(--high); }
+  .finding.MEDIUM { border-left-color: var(--med); }
+  .finding.LOW { border-left-color: var(--low); }
+  .finding .head { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
+  .finding .title { font-weight: 600; }
+  .finding .why { color: var(--muted); margin: .35rem 0; font-size: .9rem; }
+  ul.evidence { margin: .35rem 0 0; padding-left: 1.1rem; font-size: .86rem; }
+  ul.evidence li { margin: .15rem 0; }
+  .tl { list-style: none; margin: 0; padding: 0 0 0 1.1rem; border-left: 2px solid var(--border); }
+  .tl li { position: relative; padding: .35rem 0 .35rem 1rem; font-size: .87rem; }
+  .tl li::before { content: ""; position: absolute; left: -1.42rem; top: .85rem;
+                   width: 9px; height: 9px; border-radius: 50%; background: var(--info);
+                   border: 2px solid var(--bg); }
+  .tl li.finding-e::before { background: var(--high); }
+  .tl li.hypothesis-e::before { background: var(--crit); }
+  .tl li.correlation-e::before { background: var(--accent); }
+  .tl .t { color: var(--accent); font-family: ui-monospace, Consolas, monospace; }
+  .tl .d { color: var(--muted); }
+  .muted { color: var(--muted); }
+  .note { background: var(--panel-alt); border-left: 3px solid var(--accent);
+          padding: .7rem 1rem; border-radius: 0 6px 6px 0; font-size: .88rem;
+          color: var(--muted); }
+  footer { text-align: center; color: var(--muted); font-size: .8rem; margin-top: 2rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Automatic PCAP Investigator</h1>
+  <div class="sub">
+    <span class="mono">{{ capture.path }}</span> &middot;
+    {{ capture.packets }} packets &middot;
+    {{ capture.duration_seconds|duration }} &middot;
+    generated {{ generated_at }} by v{{ tool.version }}
+  </div>
+</header>
+
+<main>
+
+<!-- ============================ EXECUTIVE SUMMARY -->
+<section>
+  <h2>Executive summary</h2>
+  <div class="score-wrap">
+    <div>
+      <div class="score">{{ investigation.risk.score }}<span class="sub">/100</span></div>
+      <span class="badge {{ investigation.risk.band if investigation.risk.band != 'MINIMAL' else 'INFO' }}">{{ investigation.risk.band }}</span>
+    </div>
+    <div class="bar"><div style="width: {{ investigation.risk.score }}%"></div></div>
+  </div>
+
+  <h3>{{ investigation.verdict }}</h3>
+  <p class="sub">Confidence: <strong>{{ investigation.confidence_pct }}%</strong>
+  {% if investigation.primary_suspect %}
+    &middot; Primary suspect: <code>{{ investigation.primary_suspect }}</code>
+  {% endif %}</p>
+
+  {% for line in investigation.summary %}
+  <p>{{ line }}</p>
+  {% endfor %}
+
+  {% if investigation.attack_chain %}
+  <h3>Possible attack chain</h3>
+  <div class="chain">
+    {% for step in investigation.attack_chain %}
+      {% if not loop.first %}<span class="arrow">&#8594;</span>{% endif %}
+      <span class="step">{{ step }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="note">
+    This report describes <em>behaviour observed in a packet capture</em>. Network
+    evidence alone rarely proves intent, so every conclusion carries a confidence
+    value and the evidence it rests on. Verify on the host before acting.
+  </div>
+</section>
+
+<!-- ============================ RISK SCORE BREAKDOWN -->
+<section>
+  <h2>How the risk score was calculated</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Contribution</th><th>Weight</th><th>Multiplier</th><th>Points</th><th>Running total</th></tr></thead>
+    <tbody>
+    {% for c in investigation.risk.components %}
+      <tr>
+        <td>{{ c.label }}<br><span class="muted">{{ c.detail }}</span></td>
+        <td class="mono">{{ c.weight }}</td>
+        <td class="mono">&times;{{ c.multiplier }}</td>
+        <td class="mono">+{{ c.points }}</td>
+        <td class="mono">{{ c.running_total }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="sub">Weights are configurable (<code>Config.weights</code>); repeated findings of
+  the same type decay so one noisy detector cannot dominate the score.</p>
+</section>
+
+<!-- ============================ FINDINGS -->
+<section>
+  <h2>Findings ({{ findings|length }})</h2>
+  {% if not findings %}
+    <p class="muted">No behaviour crossed the configured detection thresholds.</p>
+  {% endif %}
+  {% for f in findings %}
+  <div class="finding {{ f.severity }}">
+    <div class="head">
+      <span class="badge {{ f.severity }}">{{ f.severity }}</span>
+      <span class="title">{{ f.title }}</span>
+      <span class="sub">{{ (f.confidence * 100)|round|int }}% confidence
+        {%- if f.tactic %} &middot; {{ f.tactic }}{% endif %}
+        {%- if f.source %} &middot; <code>{{ f.source }}</code>
+          {%- if f.destination %} &#8594; <code>{{ f.destination }}</code>{% endif %}
+        {%- endif %}</span>
+    </div>
+    <div class="why">{{ f.explanation }}</div>
+    <ul class="evidence">
+      {% for e in f.evidence %}<li>{{ e.summary }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+</section>
+
+<!-- ============================ HYPOTHESES -->
+{% if hypotheses %}
+<section>
+  <h2>Correlated hypotheses</h2>
+  {% for h in hypotheses %}
+  <div class="finding {{ h.severity }}">
+    <div class="head">
+      <span class="badge {{ h.severity }}">{{ h.severity }}</span>
+      <span class="title">{{ h.title }}</span>
+      <span class="sub">subject <code>{{ h.subject }}</code> &middot; {{ h.confidence_pct }}% confidence</span>
+    </div>
+    <div class="chain">
+      {% for step in h.attack_chain %}
+        {% if not loop.first %}<span class="arrow">&#8594;</span>{% endif %}
+        <span class="step">{{ step }}</span>
+      {% endfor %}
+    </div>
+    <div class="why">{{ h.explanation }}</div>
+    <ul class="evidence">
+      {% for c in h.correlations %}<li>{{ c }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+<!-- ============================ TIMELINE -->
+<section>
+  <h2>Timeline ({{ timeline.entry_count }} entries)</h2>
+  <ul class="tl">
+  {% for e in timeline.entries %}
+    <li class="{{ e.kind }}-e">
+      <span class="t">{{ e.time }}</span>
+      {% if e.severity %}<span class="badge {{ e.severity }}">{{ e.severity }}</span>{% endif %}
+      <strong>{{ e.title }}</strong>
+      {% if e.source %}<span class="d">
+        &middot; {{ e.source }}{% if e.destination %} &#8594; {{ e.destination }}{% endif %}
+      </span>{% endif %}
+      {% if e.detail %}<div class="d">{{ e.detail }}</div>{% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+
+<!-- ============================ HOSTS -->
+<section>
+  <h2>Hosts</h2>
+  <div class="grid">
+    <div class="stat"><div class="label">Internal</div><div class="value">{{ inventory.host_count.internal }}</div></div>
+    <div class="stat"><div class="label">External</div><div class="value">{{ inventory.host_count.external }}</div></div>
+    <div class="stat"><div class="label">Other</div><div class="value">{{ inventory.host_count.other }}</div></div>
+    <div class="stat"><div class="label">Conversations</div><div class="value">{{ inventory.conversations|length }}</div></div>
+  </div>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Host</th><th>Kind</th><th>Sent</th><th>Received</th><th>Peers</th><th>First seen</th><th>Last seen</th></tr></thead>
+    <tbody>
+    {% for h in inventory.hosts[:40] %}
+      <tr {% if h.ip == investigation.primary_suspect %}style="background:#26202a"{% endif %}>
+        <td><code>{{ h.ip }}</code>{% if h.ip == investigation.primary_suspect %} <span class="badge HIGH">SUSPECT</span>{% endif %}</td>
+        <td>{{ h.kind }}</td>
+        <td class="mono">{{ h.bytes_sent|filesize }}</td>
+        <td class="mono">{{ h.bytes_received|filesize }}</td>
+        <td class="mono">{{ h.peer_count }}</td>
+        <td class="mono">{{ h.first_seen|clock }}</td>
+        <td class="mono">{{ h.last_seen|clock }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============================ COMMUNICATIONS -->
+<section>
+  <h2>Top communications</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Source</th><th>Destination</th><th>Protocols</th><th>Ports</th><th>Packets</th><th>Bytes</th><th>Duration</th></tr></thead>
+    <tbody>
+    {% for c in inventory.conversations[:30] %}
+      <tr>
+        <td><code>{{ c.src_ip }}</code></td>
+        <td><code>{{ c.dst_ip }}</code></td>
+        <td>{{ c.protocols.keys()|list|join(", ") }}</td>
+        <td class="mono">{{ c.dst_ports.keys()|list|first_n(4) }}</td>
+        <td class="mono">{{ c.packets }}</td>
+        <td class="mono">{{ c.bytes|filesize }}</td>
+        <td class="mono">{{ c.duration_seconds|duration }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============================ PROTOCOLS -->
+<section>
+  <h2>Protocols</h2>
+  <div class="grid">
+    {% for name, count in inventory.protocols.items() %}
+    <div class="stat"><div class="label">{{ name }}</div><div class="value">{{ count }}</div></div>
+    {% endfor %}
+  </div>
+
+  {% if protocols.dns.total_queries %}
+  <h3>DNS</h3>
+  <p class="sub">{{ protocols.dns.total_queries }} queries &middot;
+     {{ protocols.dns.nxdomain_responses }} NXDOMAIN &middot;
+     {{ protocols.dns.domains|length }} base domains</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Base domain</th><th>Queries</th><th>NXDOMAIN</th><th>Unique subdomains</th><th>Max label</th><th>Max entropy</th><th>Clients</th></tr></thead>
+    <tbody>
+    {% for d in protocols.dns.domains[:15] %}
+      <tr>
+        <td><code>{{ d.base_domain }}</code></td>
+        <td class="mono">{{ d.queries }}</td>
+        <td class="mono">{{ d.nxdomains }}</td>
+        <td class="mono">{{ d.unique_subdomains }}</td>
+        <td class="mono">{{ d.max_label_length }}</td>
+        <td class="mono">{{ d.max_entropy }}</td>
+        <td class="mono">{{ d.clients|join(", ") }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+
+  {% if protocols.tls.client_hello_count %}
+  <h3>TLS</h3>
+  <p class="sub">{{ protocols.tls.client_hello_count }} ClientHello &middot;
+    {{ protocols.tls.hellos_without_sni }} without SNI &middot;
+    {{ protocols.tls.fragmented_hellos }} unparsed/fragmented</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>SNI</th><th>Count</th></tr></thead>
+    <tbody>
+    {% for sni, count in protocols.tls.top_sni.items() %}
+      <tr><td><code>{{ sni }}</code></td><td class="mono">{{ count }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+
+  {% if protocols.http.request_count %}
+  <h3>HTTP</h3>
+  <p class="sub">{{ protocols.http.request_count }} requests &middot;
+     {{ protocols.http.response_count }} responses</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Time</th><th>Source</th><th>Method</th><th>Host</th><th>URI</th><th>User-Agent</th></tr></thead>
+    <tbody>
+    {% for r in protocols.http.requests[:20] %}
+      <tr>
+        <td class="mono">{{ r.timestamp|clock }}</td>
+        <td><code>{{ r.src_ip }}</code></td>
+        <td>{{ r.method }}</td>
+        <td>{{ r.host or "-" }}</td>
+        <td class="mono">{{ r.uri|truncate(60) }}</td>
+        <td class="muted">{{ r.user_agent or "-" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+
+  {% if protocols.tcp.flow_count %}
+  <h3>TCP</h3>
+  <p class="sub">{{ protocols.tcp.flow_count }} flows &middot;
+     {{ protocols.tcp.retransmissions }} retransmissions</p>
+  <div class="grid">
+    {% for state, count in protocols.tcp.states.items() %}
+    <div class="stat"><div class="label">{{ state }}</div><div class="value">{{ count }}</div></div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+<!-- ============================ EVIDENCE TRACE -->
+<section>
+  <h2>Evidence trace</h2>
+  <p class="sub">Every conclusion above resolves to concrete observations. Finding
+     &#8594; evidence &#8594; reasoning &#8594; confidence.</p>
+  {% for item in investigation.supporting_evidence %}
+  <div class="finding {{ item.severity }}">
+    <div class="head">
+      <span class="badge {{ item.severity }}">{{ item.severity }}</span>
+      <span class="title">{{ item.finding }}</span>
+      <span class="sub"><code>{{ item.finding_id }}</code> &middot;
+        {{ (item.confidence * 100)|round|int }}% &middot; {{ item.tactic or "-" }}</span>
+    </div>
+    <div class="why">{{ item.reasoning }}</div>
+    <ul class="evidence">
+      {% for e in item.evidence %}<li>{{ e }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+</section>
+
+<footer>
+  pcap-investigator v{{ tool.version }} &middot; offline analysis, no external services
+  &middot; {{ capture.packets }} packets analysed
+  {%- if capture.malformed_packets %} ({{ capture.malformed_packets }} malformed skipped){% endif %}
+  {%- if capture.truncated %} &middot; capture was truncated{% endif %}
+</footer>
+
+</main>
+</body>
+</html>
