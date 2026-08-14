@@ -75,16 +75,19 @@ class TestBeaconing:
         assert any("mean interval" in e.summary for e in beacon.evidence)
 
     def test_ntp_beacon_is_suppressed(self, tmp_path):
-        """A metronomic NTP poll is a beacon *behaviourally* but benign; it
-        must be downgraded well below a C2-shaped beacon."""
+        """A metronomic NTP poll is a beacon *behaviourally* but benign: it
+        must be low on BOTH axes - low risk (the protocol is periodic by
+        design) and low confidence that it is noteworthy."""
         result = analyze(tmp_path, synth.ntp_beacon(count=30, interval=64.0))
         beacons = of_type(result.findings, "beaconing")
-        # It may still appear, but only at low confidence with a mitigating note.
         for beacon in beacons:
             assert beacon.confidence < 0.6
-            assert beacon.severity <= Severity.LOW
-            assert any("periodic protocol" in e_note
-                       for e_note in [beacon.explanation])
+            assert beacon.risk <= Severity.LOW
+            assert "periodic protocol" in beacon.explanation
+            # the limitation must be stated, not implied
+            assert "does not establish command-and-control" in (
+                beacon.limitations or ""
+            )
 
     def test_beacon_beats_ntp_confidence(self, tmp_path):
         c2 = analyze(tmp_path, synth.beacon(dport=4444), name="c2.pcap")

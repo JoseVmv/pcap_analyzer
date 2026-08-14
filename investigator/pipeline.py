@@ -14,7 +14,14 @@ from dataclasses import dataclass, field
 
 from investigator import threats
 from investigator.config import Config
-from investigator.correlation import Correlator, Hypothesis
+from investigator.correlation import (
+    BehaviorGroup,
+    Correlator,
+    HostRiskProfile,
+    Hypothesis,
+    build_host_profiles,
+    group_findings,
+)
 from investigator.detectors import (
     ContactSeriesTracker,
     DetectionContext,
@@ -45,6 +52,8 @@ class AnalysisResult:
     protocols: ProtocolAnalyzers
     findings: list[Finding] = field(default_factory=list)
     hypotheses: list[Hypothesis] = field(default_factory=list)
+    behavior_groups: list[BehaviorGroup] = field(default_factory=list)
+    host_profiles: list[HostRiskProfile] = field(default_factory=list)
     timeline: Timeline = field(default_factory=Timeline)
     risk: RiskScore | None = None
     investigation: Investigation | None = None
@@ -80,14 +89,28 @@ def analyze_capture(
     LOG.info("detection produced %d finding(s)", len(findings))
 
     hypotheses = Correlator(config).correlate(findings)
-    LOG.info("correlation produced %d hypothes(es)", len(hypotheses))
+    behavior_groups = group_findings(findings)
+    host_profiles = build_host_profiles(findings)
+    LOG.info(
+        "correlation produced %d hypothes(es), %d behaviour group(s), %d host profile(s)",
+        len(hypotheses),
+        len(behavior_groups),
+        len(host_profiles),
+    )
 
     timeline = build_timeline(inventory, findings, hypotheses)
     LOG.info("timeline reconstructed with %d entries", len(timeline.entries))
 
     risk = compute_risk_score(findings, hypotheses, config)
-    investigation = build_investigation(inventory, findings, hypotheses, risk)
-    LOG.info("risk score %d/100 (%s)", risk.value, risk.band)
+    investigation = build_investigation(
+        inventory, findings, hypotheses, risk, host_profiles
+    )
+    LOG.info(
+        "risk %d/100 (%s), assessment confidence %s",
+        risk.value,
+        risk.band,
+        risk.confidence_level.label,
+    )
 
     return AnalysisResult(
         loader=loader,
@@ -97,6 +120,8 @@ def analyze_capture(
         protocols=protocols,
         findings=findings,
         hypotheses=hypotheses,
+        behavior_groups=behavior_groups,
+        host_profiles=host_profiles,
         timeline=timeline,
         risk=risk,
         investigation=investigation,

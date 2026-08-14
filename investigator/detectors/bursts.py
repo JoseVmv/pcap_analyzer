@@ -109,23 +109,37 @@ class TrafficBurstDetector(Detector):
             finding = Finding(
                 type="traffic_burst",
                 title=f"Traffic burst around {_fmt(window.start)}",
-                severity=Severity.from_confidence(confidence, Severity.MEDIUM),
+                # A burst is a *volume observation*. It is deliberately LOW
+                # risk on its own: it says how much moved, never what it was
+                # or where it went. Correlation may raise its significance.
+                severity=Severity.LOW,
                 confidence=confidence,
                 explanation=(
                     f"Traffic volume between {_fmt(window.start)} and {_fmt(window.end)} "
                     f"reached {_fmt_bytes(window.peak_bytes)} per {bucket_size}s bucket, "
-                    f"{comparison}. Sudden spikes can accompany bulk transfers, "
-                    f"scanning or flooding."
+                    f"{comparison}."
+                ),
+                interpretation=(
+                    "A short period of markedly elevated traffic volume. Bursts "
+                    "accompany many ordinary activities - downloads, updates, "
+                    "backups, streaming - as well as bulk transfers, scanning and "
+                    "flooding."
+                ),
+                limitations=(
+                    "Volume alone establishes neither the direction of the data nor "
+                    "its content or purpose. A burst is not evidence of exfiltration."
                 ),
                 source=top,
                 timestamp=float(window.start),
                 start_time=float(window.start),
                 end_time=float(window.end),
+                behavior_group=f"traffic_burst:{top or '-'}",
                 metadata={
                     "bucket_size_seconds": bucket_size,
                     "peak_bytes": window.peak_bytes,
                     "window_bytes": window.total_bytes,
                     "baseline_bytes": int(baseline),
+                    "attribution": "capture-wide top talker (approximate)",
                 },
             )
             finding.add(

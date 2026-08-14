@@ -157,7 +157,8 @@ class TestReportGeneration:
         out = capsys.readouterr().out
         assert "Risk Score:" in out
         assert "INVESTIGATION SUMMARY" in out
-        assert "Possible attack chain" in out
+        assert "Observed behaviour" in out
+        assert "Recommended investigation steps" in out
 
     def test_no_html_flag(self, tmp_path, mixed_pcap):
         out_dir = tmp_path / "reports"
@@ -199,7 +200,10 @@ class TestReportGeneration:
         html = render_html(build_report(result))
 
         for section in (
-            "Executive summary", "How the risk score was calculated", "Findings",
-            "Timeline", "Hosts", "Top communications", "Protocols", "Evidence trace",
+            "Overall assessment", "Conclusion", "Priority hosts",
+            "Behavioural summary", "How the risk score was calculated",
+            "Detailed findings", "Timeline", "Hosts", "Top communications",
+            "Protocols", "Evidence trace", "Limitations",
+            "Recommended investigation steps",
         ):
             assert section in html, f"missing HTML section: {section}"

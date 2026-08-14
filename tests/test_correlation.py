@@ -37,7 +37,11 @@ class TestPhaseMapping:
         assert phase_of(finding("port_scan_vertical")) is Phase.RECON
         assert phase_of(finding("beaconing")) is Phase.C2
         assert phase_of(finding("rare_destination")) is Phase.EXTERNAL_COMM
-        assert phase_of(finding("traffic_burst")) is Phase.EXFIL
+        # A burst is direction-agnostic, so it must not sit under an
+        # outbound-transfer heading.
+        assert phase_of(finding("traffic_burst")) is Phase.VOLUME_ANOMALY
+        assert phase_of(finding("outbound_data_transfer")) is Phase.EXFIL
+        assert phase_of(finding("dns_tunneling")) is Phase.DNS_ANOMALY
 
     def test_unknown_type_has_no_phase(self):
         assert phase_of(finding("something_new")) is None
@@ -59,15 +63,18 @@ class TestCorrelator:
         assert len(hypotheses) == 1
         hypothesis = hypotheses[0]
         assert hypothesis.subject == SUSPECT
+        # Behaviour categories are named as observations, not as proven
+        # attack stages.
         assert hypothesis.narrative == [
-            "Reconnaissance",
-            "External Communication",
-            "Command & Control",
-            "Possible Data Exfiltration",
+            "Network Discovery / Scanning",
+            "Suspicious External Destinations",
+            "Periodic / Automated Communication",
+            "Traffic Volume Anomalies",
         ]
         assert hypothesis.metadata["chronological"] is True
         assert len(hypothesis.finding_ids) == 4
-        assert "C2 and data exfiltration" in hypothesis.title
+        # the title must stay hedged - never asserting compromise as fact
+        assert "consistent with possible compromise" in hypothesis.title
         assert hypothesis.correlations  # temporal sentences present
 
     def test_chronological_order_boosts_confidence(self):
@@ -85,17 +92,46 @@ class TestCorrelator:
         assert ordered_hypothesis.confidence > shuffled_hypothesis.confidence
         assert ordered_hypothesis.metadata["chronological"] is True
         assert shuffled_hypothesis.metadata["chronological"] is False
-        assert "does not follow" in shuffled_hypothesis.explanation
+        assert "do not appear in the order" in shuffled_hypothesis.explanation
 
     def test_narrative_follows_observed_order(self):
-        """The chain is a reconstruction, so it is told in the order things
+        """The summary is a reconstruction, so it is told in the order things
         actually happened - not in textbook kill-chain order."""
         shuffled = [
             finding("port_scan_vertical", start=BASE + 500),
             finding("beaconing", start=BASE),
         ]
         hypothesis = Correlator(Config()).correlate(shuffled)[0]
-        assert hypothesis.narrative == ["Command & Control", "Reconnaissance"]
+        assert hypothesis.narrative == [
+            "Periodic / Automated Communication",
+            "Network Discovery / Scanning",
+        ]
+
+    def test_no_causal_assertions_in_output(self):
+        """A capture shows co-occurrence and ordering, never causation.
+
+        The word "caused" may legitimately appear inside a *disclaimer*
+        ("does not establish that one behaviour caused the next"), so this
+        checks for causal **assertions** rather than the bare word.
+        """
+        findings = [
+            finding("port_scan_vertical", start=BASE),
+            finding("beaconing", start=BASE + 500),
+        ]
+        hypothesis = Correlator(Config()).correlate(findings)[0]
+        data = hypothesis.as_dict()
+        assert "observed_behavior" in data
+
+        text = (hypothesis.explanation + " " + " ".join(hypothesis.correlations)).lower()
+        for asserted in (
+            "led to", "resulted in", "which triggered", "and therefore",
+            "consequently", "as a result of",
+        ):
+            assert asserted not in text
+        # sequence language is fine and expected
+        assert "preceded" in text
+        # and the non-causality disclaimer must be present
+        assert "does not establish" in text or "not establish that one" in text
 
     def test_findings_grouped_per_subject(self):
         findings = [

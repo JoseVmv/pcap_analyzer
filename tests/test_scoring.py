@@ -52,6 +52,34 @@ class TestRiskScore:
         assert five.total > one.total
         assert five.total < one.total * 3
 
+    def test_same_behaviour_to_many_destinations_does_not_inflate(self):
+        """Three periodic-communication findings from one host to three
+        destinations are evidence of ONE behaviour, not three."""
+        same_activity = [
+            finding("beaconing", 0.9, source="10.0.0.15") for _ in range(3)
+        ]
+        for index, item in enumerate(same_activity):
+            item.destination = f"203.0.113.{index + 10}"
+            item.behavior_group = "periodic_communication:10.0.0.15"
+        grouped = compute_risk_score(same_activity, [], Config())
+        single = compute_risk_score([same_activity[0]], [], Config())
+
+        assert grouped.groups_counted == 1
+        assert grouped.findings_counted == 3
+        # far below 3x: the repeats decay inside the group
+        assert grouped.raw_score < single.raw_score * 2
+
+    def test_independent_behaviours_are_counted_separately(self):
+        independent = [
+            finding("beaconing", 0.9, source="10.0.0.15"),
+            finding("port_scan_vertical", 0.9, source="10.0.0.15"),
+            finding("dns_tunneling", 0.9, source="10.0.0.15"),
+        ]
+        score = compute_risk_score(independent, [], Config())
+        assert score.groups_counted == 3
+        # each contributes at full weight - no cross-group decay
+        assert all(c.multiplier >= 0.85 for c in score.components if c.points > 0)
+
     def test_correlation_adds_bonus(self):
         findings = [
             finding("port_scan_vertical", 0.8, start=1_700_000_000.0),
@@ -63,25 +91,59 @@ class TestRiskScore:
         assert with_corr.total > without.total
         assert any("Correlated" in c.label for c in with_corr.components)
 
-    def test_score_is_capped_and_reports_it(self):
+    def test_raw_and_normalized_are_reported_separately(self):
+        """Hitting the ceiling must stay visibly different from exceeding it."""
         findings = [
             finding(t, 0.95, severity=Severity.HIGH)
-            for t in ("beaconing", "dns_tunneling", "data_exfiltration",
+            for t in ("beaconing", "dns_tunneling",
+                      "potential_exfiltration_indicator",
                       "port_scan_vertical", "lateral_movement", "host_discovery")
         ]
         score = compute_risk_score(findings, [], Config())
         assert score.value == 100
+        assert score.normalized_score == 100
+        assert score.raw_score > 100          # the overflow is preserved
         assert score.capped
-        assert any("cap" in c.label.lower() for c in score.components)
+        assert any("ceiling" in c.label.lower() for c in score.components)
+
+        data = score.as_dict()
+        assert data["raw_score"] > 100
+        assert data["normalized_score"] == 100
+        # the score must never present itself as a probability
+        assert data["is_probability"] is False
+        assert "not probability" in data["interpretation"]
+
+    def test_risk_and_confidence_are_independent(self):
+        """A high-risk finding with weak evidence must not report high
+        confidence, and vice versa."""
+        high_risk_weak_evidence = [
+            finding("potential_exfiltration_indicator", 0.35, severity=Severity.HIGH)
+        ]
+        score = compute_risk_score(high_risk_weak_evidence, [], Config())
+        assert score.confidence < 0.6
+        assert score.confidence_level.label in ("LOW", "VERY LOW")
+
+        low_risk_strong_evidence = [
+            finding("traffic_burst", 0.95, severity=Severity.LOW)
+        ]
+        other = compute_risk_score(low_risk_strong_evidence, [], Config())
+        # strong evidence, but the behaviour itself carries little risk
+        assert other.confidence > score.confidence
+        assert other.band in ("LOW", "MINIMAL", "MEDIUM")
+
+    def test_uncorrelated_findings_cap_assessment_confidence(self):
+        """A lone finding cannot yield a high-confidence assessment."""
+        score = compute_risk_score([finding("beaconing", 0.97)], [], Config())
+        assert score.confidence <= 0.75
 
     def test_bands(self):
         config = Config(weights={"beaconing": 100.0})
         assert compute_risk_score(
             [finding("beaconing", 0.9)], [], config).band == "CRITICAL"
         assert compute_risk_score(
-            [finding("beaconing", 0.6)], [], config).band == "HIGH"
+            [finding("beaconing", 0.65)], [], config).band == "HIGH"
         assert compute_risk_score(
-            [finding("beaconing", 0.3)], [], config).band == "MEDIUM"
+            [finding("beaconing", 0.4)], [], config).band == "MEDIUM"
         assert compute_risk_score(
             [finding("beaconing", 0.1)], [], config).band == "LOW"
 
@@ -96,6 +158,10 @@ class TestRiskScore:
         score = compute_risk_score([finding("beaconing", 0.8)], [], Config())
         text = render_score_text(score)
         assert "Risk Score:" in text
+        assert "Severity:" in text
+        assert "Confidence:" in text
+        assert "Score interpretation:" in text
+        assert "not probability of compromise" in text
         assert "How this score was calculated" in text
         assert "weight" in text
-        assert "total" in text
+        assert "raw" in text and "normalized" in text

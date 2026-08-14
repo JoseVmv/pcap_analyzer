@@ -39,6 +39,8 @@ def build_report(result: "AnalysisResult") -> dict[str, object]:
         "protocols": result.protocols.as_dict(),
         "findings": [f.as_dict() for f in result.findings],
         "tactics": threats.tactic_summary(result.findings),
+        "behavior_groups": [g.as_dict() for g in result.behavior_groups],
+        "host_profiles": [p.as_dict() for p in result.host_profiles],
         "hypotheses": [h.as_dict() for h in result.hypotheses],
         "timeline": result.timeline.as_dict(),
         "investigation": result.investigation.as_dict()
@@ -210,19 +212,44 @@ _SEVERITY_TAG = {
 
 
 def render_findings_text(findings: list[Finding], *, limit: int = 20) -> str:
-    """Terminal section listing findings, most severe first."""
+    """Terminal section listing findings, highest risk first.
+
+    Risk and confidence are printed as separate columns, because a HIGH-risk
+    / LOW-confidence finding and a LOW-risk / HIGH-confidence one demand
+    very different responses from an analyst.
+    """
     if not findings:
         return "\nFindings:  none (no anomalies crossed detection thresholds)"
-    lines = ["", f"Findings:  {len(findings)} (most significant first)"]
+    lines = ["", f"Findings:  {len(findings)} (highest risk first)"]
     for finding in findings[:limit]:
         tag = _SEVERITY_TAG.get(finding.severity, "INFO")
         lines.append(
-            f"  [{tag:<4}] {finding.title}  ({finding.confidence_pct}%)"
+            f"  [risk {tag:<4} | confidence "
+            f"{finding.confidence_level.label:<8}] {finding.title}"
         )
         for evidence in finding.evidence[:4]:
-            lines.append(f"           - {evidence.summary}")
+            lines.append(f"      - {evidence.summary}")
+        if finding.limitations:
+            lines.append(f"      ! {finding.limitations.split('.')[0]}.")
     if len(findings) > limit:
         lines.append(f"  ... and {len(findings) - limit} more (see investigation.json)")
+    return "\n".join(lines)
+
+
+def render_behavior_groups_text(groups, *, limit: int = 10) -> str:
+    """Group related findings so one activity reads as one behaviour."""
+    if not groups:
+        return ""
+    lines = ["", "Observed behaviour (grouped):"]
+    for group in groups[:limit]:
+        subject = group.subject or "unattributed"
+        lines.append(
+            f"  |-- {group.label} - {subject} "
+            f"({len(group.findings)} finding(s), "
+            f"risk {group.max_severity.label})"
+        )
+        for destination in group.destinations[:4]:
+            lines.append(f"  |     * {destination}")
     return "\n".join(lines)
 
 

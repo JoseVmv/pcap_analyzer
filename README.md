@@ -17,38 +17,43 @@ Esta ferramenta responde por você. Ela lê a captura, entende quem conversou co
 Rodando na captura de exemplo (um incidente simulado):
 
 ```text
-Findings:  10 (most significant first)
-  [HIGH] Likely periodic beaconing to 203.0.113.66:4444  (97%)
-           - 30 contacts over 870s
-           - mean interval 30.0s, stdev 0.00s (coefficient of variation 0.000)
-           - only internal host 10.0.0.15 contacted this destination
-  [HIGH] Possible DNS tunneling / exfiltration: dataleak.io  (88%)
-           - high subdomain entropy (max 4.78 bits/char, mean 4.54)
-           - very long DNS label (48 chars)
-           - 40 unique subdomains under one domain
-           - high NXDOMAIN ratio (20/40 = 50%)
+Findings:  77 (highest risk first)
+  [risk HIGH | confidence HIGH] Periodic HTTP communication: 172.16.8.49 -> 45.130.41.161:80
+      - 8 requests over 18.98s
+      - mean interval 2.711s, median 2.71s, stdev 0.0059s, CV 0.0022
+      - methods: GET x1, POST x7
+      ! Periodicity establishes automation, not malice.
 
-Correlated hypotheses:
-  [HIGH] Possible compromised host with C2 and data exfiltration  (10.0.0.15, 92%)
-           Reconnaissance
-             |-> Lateral Movement
-               |-> External Communication
-                 |-> Command & Control
-                   |-> Possible Data Exfiltration
+Host risk profiles:
+  172.16.8.49
+    Risk: HIGH    Confidence: HIGH (98%)
+      [+] Network Discovery / Scanning (1)
+      [+] Periodic / Automated Communication (25) -> 45.130.41.161, +12 more
+      [+] DNS Anomalies (1) -> firsttolast.tech
+      [+] Traffic Volume Anomalies (10)
+      [+] Anomalous Client Characteristics (14)
 
-Risk Score: 100/100  (CRITICAL)
+Risk Score: 100/100
+Severity:   CRITICAL
+Confidence: HIGH (98%)
 
-How this score was calculated:
-  + 24.2  Likely periodic beaconing...        [weight 25 x 0.97 = confidence 97%]
-  + 17.6  Possible DNS tunneling...           [weight 20 x 0.88 = confidence 88%]
-  + 16.0  Likely data exfiltration...         [weight 20 x 0.80 = confidence 80%]
-  ------  total 100/100
+Score interpretation:
+  Multiple severe correlated network behaviours detected.
+  Score represents heuristic risk, not probability of compromise.
 
-Verdict:   High confidence: possible compromised host with c2 and data exfiltration
-Primary suspect: 10.0.0.15
+  + 20.2  Periodic HTTP communication -> 45.130.41.161  [weight 22 x 0.92]
+  + 10.1  Periodic HTTP communication -> 172.67.162.153 [x0.50 - same activity]
+  +  6.7  Periodic HTTP communication -> 121.54.163.148 [x0.33 - same activity]
+  ------  raw 155.02 -> normalized 100/100  (77 findings in 8 behaviour groups)
+
+Conclusion:
+  172.16.8.49 exhibits anomalous network behaviour. [...] The combination of
+  these indicators is consistent with a potentially compromised host and
+  warrants further investigation. Network evidence alone cannot establish
+  malware execution, compromise, or attacker intent with certainty.
 ```
 
-Repare em dois detalhes: **todo alerta vem com os números que o geraram**, e o score mostra a conta inteira. Nada de "malicioso: sim" sem explicação.
+Três detalhes importam aqui. **Risco e confiança são separados** — um deles diz o quão grave seria, o outro o quão certa é a evidência. **Findings do mesmo comportamento não inflam o score**: 25 comunicações periódicas viram um grupo só, com retornos decrescentes visíveis na conta. E **toda conclusão carrega suas limitações** — nada de "malicioso: sim".
 
 Além do terminal, você recebe um relatório HTML navegável com hosts, comunicações, protocolos, timeline e todas as evidências.
 
@@ -98,15 +103,16 @@ Aceita `.pcap`, `.pcapng` e versões comprimidas com gzip. Para gravar uma captu
 | Comportamento | O que faz suspeitar |
 |---|---|
 | 🔎 **Varredura de portas** | Um host tentando muitas portas ou muitos alvos, com a maioria das conexões falhando |
-| 📡 **Beaconing (C2)** | Conexões repetidas em intervalos regulares demais para serem humanas |
-| 🌐 **Tunelamento DNS** | Subdomínios longos, aleatórios e numerosos demais para tráfego legítimo |
-| 📤 **Exfiltração de dados** | Host enviando muito mais do que recebe, para um destino que ninguém mais acessa |
+| 📡 **Beaconing** | Conexões repetidas em intervalos regulares demais para serem humanas |
+| 🌐 **Anomalias de DNS** | Subdomínios longos, aleatórios e numerosos demais para tráfego legítimo |
+| 📤 **Transferência de saída** | Host enviando muito mais do que recebe, para um destino que ninguém mais acessa |
+| 🖥️ **HTTP anômalo** | Requisições periódicas, POSTs repetidos, User-Agent legado ou de script |
 | ↔️ **Movimento lateral** | Sessões administrativas bem-sucedidas espalhadas pela rede interna |
 | 🗺️ **Descoberta de hosts** | Varredura de endereços internos, muitos deles inexistentes |
 | ⚡ **Picos de tráfego** | Volume muito acima do padrão da própria captura |
 | 🎯 **Destinos raros / portas incomuns** | Endpoints externos que só um host acessou, em portas fora do comum |
 
-E o mais importante: ele **conecta esses achados**. Cinco alertas soltos viram uma hipótese só, com uma cadeia de ataque e uma confiança agregada.
+E o mais importante: ele **agrupa e correlaciona** esses achados. Dezenas de alertas soltos viram poucas categorias de comportamento, consolidadas por host, com risco e confiança avaliados separadamente.
 
 ---
 
@@ -118,7 +124,9 @@ E o mais importante: ele **conecta esses achados**. Cinco alertas soltos viram u
 
 **Ele leva contexto em conta.** Servidores NTP, DNS e CDNs também fazem conexões periódicas. A ferramenta reconhece esses casos e rebaixa a confiança — um beacon para a porta 123 não é tratado como um beacon para a porta 4444.
 
-**Ele nunca afirma além do que os dados permitem.** A linguagem é sempre probabilística: "possível", "provável", "alta confiança". Um pcap raramente *prova* um ataque sozinho, e o relatório diz isso explicitamente.
+**Ele separa risco de confiança.** São perguntas diferentes: *quão grave seria isso?* e *quão certa é a evidência?* Uma transferência grande de saída é risco alto com confiança baixa de ser exfiltração — o comportamento preocupa, mas o conteúdo dos pacotes é inacessível. Misturar os dois numa nota só apagaria justamente a nuance que o analista precisa.
+
+**Ele nunca afirma além do que os dados permitem.** A linguagem é sempre probabilística, e cada achado declara suas próprias limitações. Volume grande não é chamado de exfiltração; periodicidade não é chamada de C2; entropia de DNS não é chamada de tunelamento. A ferramenta detecta de forma agressiva e conclui de forma conservadora.
 
 **Ele aguenta capturas grandes.** O arquivo é lido uma única vez, pacote a pacote, sem carregar tudo na memória.
 

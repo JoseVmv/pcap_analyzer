@@ -83,7 +83,9 @@ class DnsAnomalyDetector(Detector):
         if len(signals) < cfg.dns_min_signals:
             return None
 
-        # Confidence: blend of signal count and average strength.
+        # Confidence: blend of signal count and average strength.  This is
+        # confidence that the DNS behaviour is *anomalous* - not confidence
+        # that it is tunneling, which the evidence here cannot establish.
         avg_strength = sum(s[2] for s in signals) / len(signals)
         coverage = min(1.0, len(signals) / 4.0)
         confidence = min(0.95, 0.35 + 0.35 * coverage + 0.3 * avg_strength)
@@ -97,30 +99,74 @@ class DnsAnomalyDetector(Detector):
             )
         )
         if looks_like_tunnel:
-            ftype, label = "dns_tunneling", "Possible DNS tunneling / exfiltration"
+            ftype = "dns_tunneling"
+            label = "Suspicious DNS behaviour (tunneling-like)"
+            risk = Severity.HIGH
+            interpretation = (
+                "The query pattern has the shape data-carrying DNS traffic "
+                "produces: high-entropy, long, numerous unique labels under one "
+                "controlled domain."
+            )
         else:
-            ftype, label = "dns_anomaly", "Unusual DNS behaviour"
+            ftype = "dns_anomaly"
+            label = "Unusual DNS behaviour"
+            risk = Severity.MEDIUM
+            interpretation = (
+                "The query pattern deviates from the ordinary name-resolution "
+                "traffic seen elsewhere in this capture."
+            )
 
+        nx_ratio = domain.nxdomains / domain.queries if domain.queries else 0.0
         finding = Finding(
             type=ftype,
             title=f"{label}: {domain.base_domain}",
-            severity=Severity.from_confidence(confidence, Severity.HIGH),
+            severity=risk,
             confidence=confidence,
             explanation=(
                 f"Queries for {domain.base_domain} combine {len(signals)} independent "
-                f"anomaly signals (listed below). No single signal is conclusive, but "
-                f"their combination is consistent with "
-                + ("automated data transfer over DNS" if looks_like_tunnel
-                   else "abnormal DNS usage")
-                + f". {domain.queries} queries from {len(domain.clients)} client(s)."
+                f"anomaly indicators (listed below), across {domain.queries} queries "
+                f"from {len(domain.clients)} client(s). No single indicator is "
+                f"conclusive; the assessment rests on their combination."
+            ),
+            interpretation=interpretation,
+            limitations=(
+                "High entropy and NXDOMAIN volume do NOT confirm DNS tunneling. The "
+                "same indicators are produced by domain-generation-algorithm lookups, "
+                "malformed or stale client configuration, content-delivery and "
+                "anti-spam lookups (DNSBL), telemetry using hashed labels, and "
+                "security products that encode data in subdomains. Confirming "
+                "tunneling requires inspecting query payloads and the resolver's "
+                "responses over time."
             ),
             source=sorted(domain.clients)[0] if domain.clients else None,
             destination=domain.base_domain,
+            behavior_group=(
+                f"dns_anomaly:{sorted(domain.clients)[0]}"
+                if domain.clients
+                else f"dns_anomaly:{domain.base_domain}"
+            ),
             metadata={
                 "base_domain": domain.base_domain,
                 "clients": sorted(domain.clients),
                 "signal_count": len(signals),
-                "queries": domain.queries,
+                "possible_explanations": [
+                    "algorithmically generated domains (DGA)",
+                    "malformed or misconfigured client queries",
+                    "malware command-and-control infrastructure",
+                    "DNS tunneling",
+                    "legitimate services encoding data in subdomains",
+                ],
+                "statistics": {
+                    "queries": domain.queries,
+                    "nxdomain": domain.nxdomains,
+                    "nxdomain_ratio": round(nx_ratio, 4),
+                    "unique_subdomains": len(domain.unique_subdomains),
+                    "max_label_length": domain.max_label_length,
+                    "max_entropy": round(domain.max_entropy, 3),
+                    "mean_entropy": round(domain.mean_entropy, 3),
+                    "txt_or_null_queries": domain.txt_or_null_queries,
+                    "client_count": len(domain.clients),
+                },
             },
         )
         for summary, data, _strength in signals:

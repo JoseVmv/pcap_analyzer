@@ -178,12 +178,17 @@ def run(argv: list[str] | None = None) -> int:
     # It also keeps `--help`/`--version` fast: scapy takes a while to load.
     from pathlib import Path
 
-    from investigator.investigation import render_investigation_text
+    from investigator.investigation import (
+        render_host_profiles_text,
+        render_investigation_text,
+    )
     from investigator.parser import PcapLoader
     from investigator.pipeline import analyze_capture
+    from investigator.recommendations import render_recommendations_text
     from investigator.reporting import (
         build_report,
         build_timeline_report,
+        render_behavior_groups_text,
         render_findings_text,
         render_hypotheses_text,
         render_inventory_text,
@@ -233,6 +238,12 @@ def run(argv: list[str] | None = None) -> int:
     if protocol_text:
         print(protocol_text)
     print(render_findings_text(result.findings, limit=args.top))
+    groups_text = render_behavior_groups_text(result.behavior_groups)
+    if groups_text:
+        print(groups_text)
+    profiles_text = render_host_profiles_text(result.host_profiles)
+    if profiles_text:
+        print(profiles_text)
     hypotheses_text = render_hypotheses_text(result.hypotheses)
     if hypotheses_text:
         print(hypotheses_text)
@@ -246,6 +257,7 @@ def run(argv: list[str] | None = None) -> int:
         print(render_score_text(result.risk))
     if result.investigation is not None:
         print(render_investigation_text(result.investigation))
+        print(render_recommendations_text(result.investigation.recommendations))
 
     print("\nReports:")
     for path in written:

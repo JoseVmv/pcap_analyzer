@@ -87,14 +87,41 @@ class ContactSeriesTracker:
 
 @dataclass(slots=True)
 class BeaconStats:
+    """Full interval statistics for one contact series.
+
+    Everything an analyst needs to judge the periodicity independently is
+    reported, not just the verdict: an analyst who disagrees with the
+    thresholds can re-read the raw numbers and draw their own conclusion.
+    """
+
     key: SeriesKey
     count: int
+    first_seen: float
+    last_seen: float
     mean_interval: float
+    median_interval: float
     stdev_interval: float
+    min_interval: float
+    max_interval: float
     cv: float
     mad_ratio: float
     duration: float
     regularity: float  # 0..1, higher = more regular
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "connection_count": self.count,
+            "first_seen": self.first_seen,
+            "last_seen": self.last_seen,
+            "duration_seconds": round(self.duration, 2),
+            "mean_interval": round(self.mean_interval, 3),
+            "median_interval": round(self.median_interval, 3),
+            "stdev_interval": round(self.stdev_interval, 4),
+            "min_interval": round(self.min_interval, 3),
+            "max_interval": round(self.max_interval, 3),
+            "coefficient_of_variation": round(self.cv, 4),
+            "mad_ratio": round(self.mad_ratio, 4),
+        }
 
 
 def analyse_series(timestamps: array, min_interval: float) -> BeaconStats | None:
@@ -122,8 +149,13 @@ def analyse_series(timestamps: array, min_interval: float) -> BeaconStats | None
     return BeaconStats(
         key=("", "", 0, ""),  # filled by caller
         count=len(ordered),
+        first_seen=ordered[0],
+        last_seen=ordered[-1],
         mean_interval=mu,
+        median_interval=med,
         stdev_interval=sd,
+        min_interval=min(intervals),
+        max_interval=max(intervals),
         cv=cv,
         mad_ratio=mad_ratio,
         duration=ordered[-1] - ordered[0],
@@ -207,22 +239,28 @@ class BeaconingDetector(Detector):
             confidence += 0.05  # contacting a raw IP nobody resolved is odder
 
         confidence = max(0.05, min(0.97, confidence))
-        # External + regular + unresolved is the case we most want to surface.
-        severity_ceiling = (
-            Severity.HIGH if dst_kind is HostKind.EXTERNAL else Severity.MEDIUM
-        )
-        severity = Severity.from_confidence(confidence, severity_ceiling)
-        if severity < Severity.LOW:
+        if confidence < 0.3:
             return None
+
+        # Risk is a property of *where* and *how* the beacon goes, set
+        # independently of how confident we are that it is a beacon.
+        # Protocols that are periodic by design (NTP/DNS/DHCP) carry low
+        # risk even when external: the behaviour is what the protocol does.
+        if dport in PERIODIC_INFRA_PORTS:
+            risk = Severity.LOW
+        elif dst_kind is HostKind.EXTERNAL:
+            risk = Severity.HIGH if dport not in COMMON_SERVICE_PORTS else Severity.MEDIUM
+        else:
+            risk = Severity.LOW
 
         label = "likely" if confidence >= 0.7 else "possible"
         title = f"{label.capitalize()} periodic beaconing to {dst}:{dport}"
         explanation = (
             f"Host {src} contacted {dst}:{dport}/{proto} {stats.count} times at a "
-            f"near-constant interval of ~{stats.mean_interval:.1f}s. Regular, "
-            f"automated timing like this is characteristic of scheduled check-ins "
-            f"(including benign agents); it is reported as {label} beaconing, not "
-            f"a confirmed threat."
+            f"near-constant interval of ~{stats.mean_interval:.1f}s "
+            f"(coefficient of variation {stats.cv:.3f}; a perfectly regular series "
+            f"scores 0). Timing this regular is characteristic of an automated "
+            f"process rather than human-driven activity."
         )
         if fp_notes:
             explanation += " Mitigating context: " + "; ".join(fp_notes) + "."
@@ -230,29 +268,48 @@ class BeaconingDetector(Detector):
         finding = Finding(
             type="beaconing",
             title=title,
-            severity=severity,
+            severity=risk,
             confidence=confidence,
             explanation=explanation,
+            interpretation=(
+                "Repeated periodic communication is consistent with automated "
+                "beaconing, such as a scheduled check-in to a remote service."
+            ),
+            limitations=(
+                "Periodicity alone does not establish command-and-control activity. "
+                "Update checks, telemetry, monitoring agents, mail pollers and "
+                "keep-alives are all legitimately periodic. The purpose of this "
+                "channel cannot be determined from packet timing alone."
+            ),
             source=src,
             destination=dst,
             timestamp=None,
+            behavior_group=f"periodic_communication:{src}",
             metadata={
                 "dst_port": dport,
                 "protocol": proto,
-                "mean_interval": round(stats.mean_interval, 3),
                 "resolved_names": sorted(resolved_names),
+                "statistics": stats.as_dict(),
             },
         )
         finding.add(
-            f"{stats.count} contacts over {stats.duration:.0f}s",
-            count=stats.count,
-            duration_seconds=round(stats.duration, 1),
+            f"{stats.count} connections over {stats.duration:.0f}s "
+            f"({proto}/{dport})",
+            **stats.as_dict(),
         )
         finding.add(
-            f"mean interval {stats.mean_interval:.1f}s, stdev {stats.stdev_interval:.2f}s "
-            f"(coefficient of variation {stats.cv:.3f})",
+            f"mean interval {stats.mean_interval:.2f}s, median "
+            f"{stats.median_interval:.2f}s, stdev {stats.stdev_interval:.3f}s",
             mean_interval=round(stats.mean_interval, 3),
-            stdev_interval=round(stats.stdev_interval, 3),
+            median_interval=round(stats.median_interval, 3),
+            stdev_interval=round(stats.stdev_interval, 4),
+        )
+        finding.add(
+            f"interval range {stats.min_interval:.2f}s - {stats.max_interval:.2f}s; "
+            f"coefficient of variation {stats.cv:.4f} "
+            f"(<{cfg.beacon_regular_cv} = highly regular)",
+            min_interval=round(stats.min_interval, 3),
+            max_interval=round(stats.max_interval, 3),
             cv=round(stats.cv, 4),
             mad_ratio=round(stats.mad_ratio, 4),
         )

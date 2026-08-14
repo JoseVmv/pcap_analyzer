@@ -19,9 +19,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from investigator.correlation import Hypothesis
-from investigator.findings import Finding, Severity
+from investigator.correlation import HostRiskProfile, Hypothesis
+from investigator.findings import Confidence, Finding, Severity
 from investigator.inventory import HostKind, NetworkInventory
+from investigator.recommendations import Recommendation, build_recommendations
 from investigator.scoring import RiskScore
 
 
@@ -60,27 +61,44 @@ class Investigation:
     summary_lines: list[str]
     confidence: float
     verdict: str
+    host_profiles: list[HostRiskProfile] = field(default_factory=list)
+    recommendations: list[Recommendation] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
+    conclusion: str = ""
 
     @property
     def primary_suspect(self) -> str | None:
         return self.suspects[0].ip if self.suspects else None
 
+    @property
+    def confidence_level(self) -> Confidence:
+        return Confidence.from_score(self.confidence)
+
     def as_dict(self) -> dict[str, object]:
         return {
             "verdict": self.verdict,
+            "conclusion": self.conclusion,
             "confidence": round(self.confidence, 3),
             "confidence_pct": round(self.confidence * 100),
+            "confidence_level": self.confidence_level.label,
             "risk": self.risk.as_dict(),
             "primary_suspect": self.primary_suspect,
             "suspects": [s.as_dict() for s in self.suspects],
+            "host_profiles": [p.as_dict() for p in self.host_profiles],
             "primary_hypothesis": (
                 self.primary_hypothesis.as_dict() if self.primary_hypothesis else None
             ),
+            "observed_behavior": (
+                self.primary_hypothesis.narrative if self.primary_hypothesis else []
+            ),
+            # Legacy alias; this is an observation sequence, not a causal chain.
             "attack_chain": (
                 self.primary_hypothesis.narrative if self.primary_hypothesis else []
             ),
             "supporting_evidence": self.supporting_evidence,
             "summary": self.summary_lines,
+            "limitations": self.limitations,
+            "recommended_steps": [r.as_dict() for r in self.recommendations],
         }
 
 
@@ -133,11 +151,124 @@ def _hedge(confidence: float) -> str:
     return "Weak / inconclusive"
 
 
+#: Standing limitations of packet-only analysis.  Stated in every report so
+#: a conclusion is never read as more than the data can support.
+_BASE_LIMITATIONS = [
+    "Network evidence alone cannot establish malware execution, compromise, or "
+    "attacker intent with certainty.",
+    "Encrypted payloads were not decrypted, so the content of TLS sessions is "
+    "unknown.",
+    "Conclusions apply only to traffic visible at this capture point and within "
+    "the captured time window.",
+]
+
+
+def _behaviour_phrases(findings: list[Finding]) -> list[str]:
+    """Neutral, observation-level phrases for the conclusion paragraph."""
+    present = {f.type for f in findings}
+    phrases: list[str] = []
+    if present & {"port_scan_vertical", "port_scan_horizontal", "host_discovery"}:
+        phrases.append("network scanning and host discovery")
+    if present & {"beaconing", "http_beaconing"}:
+        phrases.append("periodic automated external communication")
+    if present & {"dns_anomaly", "dns_tunneling"}:
+        phrases.append("anomalous DNS query patterns")
+    if present & {"rare_destination", "unusual_port"}:
+        phrases.append("communication with uncommon external destinations")
+    if "http_anomaly" in present:
+        phrases.append("anomalous HTTP client characteristics")
+    if present & {
+        "outbound_data_transfer", "potential_exfiltration_indicator",
+        "data_exfiltration",
+    }:
+        phrases.append("potentially significant outbound data transfers")
+    elif "large_transfer" in present:
+        # Direction was not upload-dominant: say so rather than implying it.
+        phrases.append("large data transfers of undetermined direction")
+    if "lateral_movement" in present:
+        phrases.append("internal host-to-host administrative activity")
+    if "traffic_burst" in present:
+        phrases.append("abnormal traffic volume bursts")
+    return phrases
+
+
+def _build_conclusion(
+    primary_suspect: str | None,
+    findings: list[Finding],
+    hypothesis: Hypothesis | None,
+    confidence: float,
+) -> str:
+    """Generate the forensic conclusion paragraph from real findings."""
+    if not findings:
+        return (
+            "No behaviour in this capture crossed the configured detection "
+            "thresholds. This is not evidence that the traffic is benign: the "
+            "capture may be too short, may not include the relevant hosts, or the "
+            "activity may be indistinguishable from normal use at this vantage "
+            "point."
+        )
+
+    host = primary_suspect or "The observed traffic"
+    phrases = _behaviour_phrases(findings)
+    parts: list[str] = []
+
+    if primary_suspect:
+        parts.append(f"{host} exhibits anomalous network behaviour.")
+    else:
+        parts.append("Anomalous network behaviour was observed in this capture.")
+
+    if phrases:
+        parts.append("Observed indicators include " + "; ".join(phrases) + ".")
+
+    present = {f.type for f in findings}
+    if hypothesis is not None and len(hypothesis.phases) >= 2:
+        parts.append(
+            f"The combination of these indicators is consistent with a potentially "
+            f"compromised host and warrants further investigation "
+            f"({round(confidence * 100)}% confidence in this reading)."
+        )
+    else:
+        parts.append(
+            "The indicators do not currently converge into a single correlated "
+            "pattern, so they stand as individual anomalies rather than a unified "
+            "assessment."
+        )
+
+    if present & {"beaconing", "http_beaconing"}:
+        parts.append(
+            "Possible automated command-and-control communication is supported by "
+            "the observed periodic behaviour, though periodicity is also produced "
+            "by legitimate automated software."
+        )
+
+    if present & {"potential_exfiltration_indicator", "outbound_data_transfer",
+                  "large_transfer", "data_exfiltration"}:
+        parts.append(
+            "Potential outbound data transfer was observed, but the available "
+            "network evidence does not independently establish data exfiltration; "
+            "payload content could not be determined."
+        )
+
+    if present & {"dns_tunneling", "dns_anomaly"}:
+        parts.append(
+            "DNS query patterns were anomalous; this is consistent with several "
+            "explanations, of which tunneling is only one and is not confirmed by "
+            "these indicators alone."
+        )
+
+    parts.append(
+        "Network evidence alone cannot establish malware execution, compromise, or "
+        "attacker intent with certainty."
+    )
+    return " ".join(parts)
+
+
 def build_investigation(
     inventory: NetworkInventory,
     findings: list[Finding],
     hypotheses: list[Hypothesis],
     risk: RiskScore,
+    host_profiles: list[HostRiskProfile] | None = None,
 ) -> Investigation:
     suspects = rank_suspects(findings)
     primary_suspect = suspects[0].ip if suspects else None
@@ -193,39 +324,53 @@ def build_investigation(
         if primary_hypothesis is not None:
             verdict = f"{hedge}: {primary_hypothesis.title.lower()}"
             lines.append(
-                f"Most suspicious host: {primary_suspect} "
+                f"Priority host: {primary_suspect} "
                 f"({suspects[0].finding_count} findings, "
                 f"tactics: {', '.join(suspects[0].tactics) or 'n/a'})."
             )
             lines.append(
-                f"Primary hypothesis: {primary_hypothesis.title} "
-                f"({round(primary_hypothesis.confidence * 100)}% confidence)."
+                f"Assessment: {primary_hypothesis.title} "
+                f"(risk {primary_hypothesis.severity.label}, confidence "
+                f"{primary_hypothesis.confidence_level.label} / "
+                f"{round(primary_hypothesis.confidence * 100)}%)."
             )
             lines.append(
-                "Attack chain: " + " -> ".join(primary_hypothesis.narrative) + "."
+                "Observed behaviour categories: "
+                + ", ".join(primary_hypothesis.narrative) + "."
             )
             lines.append(primary_hypothesis.explanation)
         else:
             top = max(findings, key=lambda f: (f.severity, f.confidence))
-            verdict = f"{hedge}: isolated suspicious activity ({top.type})"
+            verdict = f"{hedge}: isolated anomalous activity ({top.type})"
             lines.append(
-                f"Most suspicious host: {primary_suspect} "
+                f"Priority host: {primary_suspect} "
                 f"({suspects[0].finding_count} finding(s))."
             )
             lines.append(
-                "No multi-phase chain was established, so the findings stand "
-                "individually rather than as a single narrative."
+                "The findings did not correlate into a single pattern, so they "
+                "stand individually rather than as a unified assessment."
             )
         lines.append(
-            f"Risk score: {risk.value}/100 ({risk.band}) - see the score breakdown "
-            f"for how it was derived."
+            f"Risk {risk.value}/100 ({risk.band}), assessment confidence "
+            f"{risk.confidence_level.label}. {risk.interpretation}"
         )
 
     internal = len([h for h in inventory.hosts.values() if h.kind is HostKind.INTERNAL])
     external = len([h for h in inventory.hosts.values() if h.kind is HostKind.EXTERNAL])
-    lines.append(
-        f"Scope of this capture: {internal} internal and {external} external hosts "
-        f"observed. Conclusions apply only to traffic visible at this capture point."
+
+    limitations = list(_BASE_LIMITATIONS)
+    limitations.insert(
+        0,
+        f"Scope: {internal} internal and {external} external hosts were observed at "
+        f"this capture point.",
+    )
+    # Surface detector-specific caveats, de-duplicated.
+    for finding in findings:
+        if finding.limitations and finding.limitations not in limitations:
+            limitations.append(finding.limitations)
+
+    conclusion = _build_conclusion(
+        primary_suspect, findings, primary_hypothesis, confidence
     )
 
     return Investigation(
@@ -236,36 +381,104 @@ def build_investigation(
         summary_lines=lines,
         confidence=confidence,
         verdict=verdict,
+        host_profiles=list(host_profiles or []),
+        recommendations=build_recommendations(findings, primary_suspect),
+        limitations=limitations,
+        conclusion=conclusion,
     )
+
+
+def render_host_profiles_text(
+    profiles: list[HostRiskProfile], *, limit: int = 3
+) -> str:
+    """Consolidated per-host view - far more useful than N loose findings."""
+    if not profiles:
+        return ""
+    lines = ["", "Host risk profiles:"]
+    for profile in profiles[:limit]:
+        lines.append("")
+        lines.append(f"  {profile.ip}")
+        lines.append(
+            f"    Risk: {profile.risk.label}    "
+            f"Confidence: {profile.confidence_level.label} "
+            f"({round(profile.confidence * 100)}%)"
+        )
+        lines.append(f"    Indicators ({profile.finding_count} findings):")
+        for group in profile.groups:
+            destinations = group.destinations
+            suffix = ""
+            if destinations:
+                shown = ", ".join(destinations[:3])
+                if len(destinations) > 3:
+                    shown += f", +{len(destinations) - 3} more"
+                suffix = f" -> {shown}"
+            lines.append(
+                f"      [+] {group.label} ({len(group.findings)}){suffix}"
+            )
+    return "\n".join(lines)
 
 
 def render_investigation_text(investigation: Investigation) -> str:
     """Executive summary block for the terminal."""
     lines = ["", "=" * 40, "INVESTIGATION SUMMARY".center(40).rstrip(), "=" * 40, ""]
-    lines.append(f"Verdict:   {investigation.verdict}")
-    lines.append(f"Confidence: {round(investigation.confidence * 100)}%")
+    lines.append(f"Verdict:    {investigation.verdict}")
+    lines.append(
+        f"Risk:       {investigation.risk.band} ({investigation.risk.value}/100)"
+    )
+    lines.append(
+        f"Confidence: {investigation.confidence_level.label} "
+        f"({round(investigation.confidence * 100)}%)"
+    )
     if investigation.primary_suspect:
-        lines.append(f"Primary suspect: {investigation.primary_suspect}")
+        lines.append(f"Priority host: {investigation.primary_suspect}")
     lines.append("")
     for line in investigation.summary_lines:
         lines.append(f"  {line}")
 
     if investigation.primary_hypothesis:
         lines.append("")
-        lines.append("Possible attack chain:")
-        for index, phase in enumerate(investigation.primary_hypothesis.narrative):
-            if index:
-                lines.append("        |")
-                lines.append("        v")
-            lines.append(f"    {phase}")
+        lines.append("Observed behaviour (categories, not a causal chain):")
+        for phase in investigation.primary_hypothesis.narrative:
+            lines.append(f"    |-- {phase}")
 
     if investigation.supporting_evidence:
         lines.append("")
         lines.append("Supporting evidence:")
         for item in investigation.supporting_evidence[:6]:
             lines.append(
-                f"  - {item['finding']} ({round(float(item['confidence']) * 100)}%)"
+                f"  - {item['finding']} "
+                f"(risk {item['severity']}, confidence "
+                f"{round(float(item['confidence']) * 100)}%)"
             )
             for evidence in list(item["evidence"])[:2]:
                 lines.append(f"      * {evidence}")
+
+    lines.append("")
+    lines.append("Conclusion:")
+    for chunk in _wrap(investigation.conclusion, 72):
+        lines.append(f"  {chunk}")
+
+    if investigation.limitations:
+        lines.append("")
+        lines.append("Limitations:")
+        for limitation in investigation.limitations[:4]:
+            for index, chunk in enumerate(_wrap(limitation, 70)):
+                lines.append(f"  {'- ' if index == 0 else '  '}{chunk}")
     return "\n".join(lines)
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Minimal greedy wrapper (avoids a textwrap import for one call site)."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) > width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines

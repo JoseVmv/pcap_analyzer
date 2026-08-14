@@ -27,21 +27,44 @@ def of_type(findings, ftype):
     return [f for f in findings if f.type == ftype]
 
 
-class TestDataExfiltration:
-    def test_large_upload_detected(self, tmp_path):
-        result = analyze(tmp_path, synth.bulk_upload(segments=1000, seg_bytes=1400))
-        exfils = of_type(result.findings, "data_exfiltration")
-        assert len(exfils) == 1
-        exfil = exfils[0]
-        assert exfil.source == "10.0.0.15"
-        assert exfil.destination == "203.0.113.66"
-        assert exfil.tactic == "Exfiltration"
-        assert exfil.severity >= Severity.MEDIUM
-        assert exfil.metadata["bytes_sent"] >= 1_000_000
-        assert any("sent vs" in e.summary for e in exfil.evidence)
+#: All tiers the transfer detector can emit, weakest to strongest claim.
+TRANSFER_TYPES = (
+    "large_transfer",
+    "outbound_data_transfer",
+    "potential_exfiltration_indicator",
+)
 
-    def test_balanced_download_not_flagged(self, tmp_path):
-        """A host that downloads more than it uploads is normal traffic."""
+
+def transfers(findings):
+    return [f for f in findings if f.type in TRANSFER_TYPES]
+
+
+class TestDataTransferTiers:
+    def test_large_upload_is_reported_but_not_called_exfiltration(self, tmp_path):
+        """Volume + direction alone must not reach the exfiltration tier."""
+        result = analyze(tmp_path, synth.bulk_upload(segments=1000, seg_bytes=1400))
+        found = transfers(result.findings)
+        assert len(found) == 1
+        transfer = found[0]
+        assert transfer.source == "10.0.0.15"
+        assert transfer.destination == "203.0.113.66"
+        assert transfer.metadata["bytes_sent"] >= 1_000_000
+        assert any("sent vs" in e.summary for e in transfer.evidence)
+        # the honest limitation must always travel with the finding
+        assert "content could not be established" in (transfer.limitations or "")
+
+    def test_tier_escalates_only_with_corroborating_indicators(self, tmp_path):
+        result = analyze(tmp_path, synth.bulk_upload(segments=1000, seg_bytes=1400))
+        transfer = transfers(result.findings)[0]
+        indicators = transfer.metadata["indicator_count"]
+        if transfer.type == "potential_exfiltration_indicator":
+            assert indicators >= 2
+        else:
+            assert transfer.type == "outbound_data_transfer"
+            assert indicators < 2
+
+    def test_balanced_download_stays_at_lowest_tier(self, tmp_path):
+        """A host that downloads as much as it uploads is not upload-dominant."""
         packets = []
         seq_out = seq_in = 1
         t = synth.BASE_TS
@@ -57,21 +80,39 @@ class TestDataExfiltration:
             seq_in += 1400
             t += 0.01
         result = analyze(tmp_path, packets, name="balanced.pcap")
-        assert of_type(result.findings, "data_exfiltration") == []
+        found = transfers(result.findings)
+        assert all(f.type == "large_transfer" for f in found)
+        assert of_type(result.findings, "potential_exfiltration_indicator") == []
+
+    def test_large_download_is_not_an_exfiltration_indicator(self, tmp_path):
+        """Download-dominant traffic must never reach the exfiltration tier."""
+        packets = []
+        seq = 1
+        t = synth.BASE_TS
+        for i in range(1200):
+            down = Ether() / IP(src="203.0.113.66", dst="10.0.0.15") / TCP(
+                sport=443, dport=52000, flags="PA", seq=seq) / Raw(b"D" * 1400)
+            down.time = t
+            packets.append(down)
+            seq += 1400
+            t += 0.01
+        result = analyze(tmp_path, packets, name="download.pcap")
+        assert of_type(result.findings, "potential_exfiltration_indicator") == []
+        assert of_type(result.findings, "outbound_data_transfer") == []
 
     def test_small_transfer_below_threshold(self, tmp_path):
         result = analyze(tmp_path, synth.bulk_upload(segments=50, seg_bytes=1400),
                          name="small.pcap")
-        assert of_type(result.findings, "data_exfiltration") == []
+        assert transfers(result.findings) == []
 
     def test_threshold_is_configurable(self, tmp_path):
         result = analyze(
             tmp_path,
             synth.bulk_upload(segments=50, seg_bytes=1400),
             name="small2.pcap",
-            config=Config(exfil_min_bytes=10_000),
+            config=Config(transfer_min_bytes=10_000),
         )
-        assert len(of_type(result.findings, "data_exfiltration")) == 1
+        assert len(transfers(result.findings)) == 1
 
 
 class TestLateralMovement:

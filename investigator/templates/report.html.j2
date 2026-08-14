@@ -110,54 +110,118 @@
 
 <main>
 
-<!-- ============================ EXECUTIVE SUMMARY -->
+<!-- ============================ OVERALL RISK -->
 <section>
-  <h2>Executive summary</h2>
+  <h2>Overall assessment</h2>
   <div class="score-wrap">
     <div>
-      <div class="score">{{ investigation.risk.score }}<span class="sub">/100</span></div>
-      <span class="badge {{ investigation.risk.band if investigation.risk.band != 'MINIMAL' else 'INFO' }}">{{ investigation.risk.band }}</span>
+      <div class="score">{{ investigation.risk.normalized_score }}<span class="sub">/100</span></div>
+      <span class="badge {{ investigation.risk.severity if investigation.risk.severity != 'MINIMAL' else 'INFO' }}">RISK {{ investigation.risk.severity }}</span>
+      <span class="badge INFO">CONFIDENCE {{ investigation.risk.confidence_level }}</span>
     </div>
-    <div class="bar"><div style="width: {{ investigation.risk.score }}%"></div></div>
+    <div class="bar"><div style="width: {{ investigation.risk.normalized_score }}%"></div></div>
+  </div>
+
+  <div class="note">
+    <strong>Score interpretation.</strong> {{ investigation.risk.interpretation }}
+    {% if investigation.risk.capped %}
+      The raw accumulation was {{ investigation.risk.raw_score }} points, above the
+      100-point presentation ceiling; reaching the ceiling marks a severe combination
+      of indicators, not certainty of compromise.
+    {% endif %}
+    <br><strong>Risk</strong> is how serious the observed behaviour would be if the
+    interpretation is correct. <strong>Confidence</strong> is how strongly the
+    available evidence supports that interpretation. They are independent.
   </div>
 
   <h3>{{ investigation.verdict }}</h3>
-  <p class="sub">Confidence: <strong>{{ investigation.confidence_pct }}%</strong>
   {% if investigation.primary_suspect %}
-    &middot; Primary suspect: <code>{{ investigation.primary_suspect }}</code>
-  {% endif %}</p>
+  <p class="sub">Priority host: <code>{{ investigation.primary_suspect }}</code></p>
+  {% endif %}
 
   {% for line in investigation.summary %}
   <p>{{ line }}</p>
   {% endfor %}
+</section>
 
-  {% if investigation.attack_chain %}
-  <h3>Possible attack chain</h3>
-  <div class="chain">
-    {% for step in investigation.attack_chain %}
-      {% if not loop.first %}<span class="arrow">&#8594;</span>{% endif %}
-      <span class="step">{{ step }}</span>
-    {% endfor %}
+<!-- ============================ CONCLUSION -->
+{% if investigation.conclusion %}
+<section>
+  <h2>Conclusion</h2>
+  <p>{{ investigation.conclusion }}</p>
+</section>
+{% endif %}
+
+<!-- ============================ PRIORITY HOSTS -->
+{% if host_profiles %}
+<section>
+  <h2>Priority hosts</h2>
+  <p class="sub">Consolidated view per host: every indicator attributed to it,
+  grouped by behaviour category.</p>
+  {% for p in host_profiles %}
+  <div class="finding {{ p.risk }}">
+    <div class="head">
+      <span class="badge {{ p.risk }}">RISK {{ p.risk }}</span>
+      <span class="badge INFO">CONFIDENCE {{ p.confidence_level }}</span>
+      <span class="title"><code>{{ p.ip }}</code></span>
+      <span class="sub">{{ p.finding_count }} finding(s)</span>
+    </div>
+    <ul class="evidence">
+      {% for g in p.behavior_categories %}
+      <li><strong>{{ g.category }}</strong>
+        ({{ g.finding_count }}, max risk {{ g.max_severity }})
+        {%- if g.destinations %} &rarr;
+          {% for d in g.destinations[:4] %}<code>{{ d }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+          {%- if g.destinations|length > 4 %} &hellip;{% endif %}
+        {%- endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    <div class="why"><strong>Why this host:</strong> {{ p.rationale }}</div>
   </div>
-  {% endif %}
+  {% endfor %}
+</section>
+{% endif %}
 
-  <div class="note">
-    This report describes <em>behaviour observed in a packet capture</em>. Network
-    evidence alone rarely proves intent, so every conclusion carries a confidence
-    value and the evidence it rests on. Verify on the host before acting.
+<!-- ============================ BEHAVIOURAL SUMMARY -->
+{% if behavior_groups %}
+<section>
+  <h2>Behavioural summary</h2>
+  <p class="sub">What was observed, grouped by category. These are independent
+  observations - their listing order does not imply that one caused another.</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Behaviour category</th><th>Host</th><th>Findings</th><th>Max risk</th><th>Destinations</th></tr></thead>
+    <tbody>
+    {% for g in behavior_groups %}
+      <tr>
+        <td>{{ g.category }}</td>
+        <td class="mono">{{ g.subject or '-' }}</td>
+        <td class="mono">{{ g.finding_count }}</td>
+        <td><span class="badge {{ g.max_severity }}">{{ g.max_severity }}</span></td>
+        <td class="mono">
+          {%- for d in g.destinations[:3] %}{{ d }}{% if not loop.last %}, {% endif %}{% endfor %}
+          {%- if g.destinations|length > 3 %} +{{ g.destinations|length - 3 }}{% endif %}
+          {%- if not g.destinations %}-{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
   </div>
 </section>
+{% endif %}
 
 <!-- ============================ RISK SCORE BREAKDOWN -->
 <section>
   <h2>How the risk score was calculated</h2>
   <div class="scroll">
   <table>
-    <thead><tr><th>Contribution</th><th>Weight</th><th>Multiplier</th><th>Points</th><th>Running total</th></tr></thead>
+    <thead><tr><th>Contribution</th><th>Behaviour group</th><th>Weight</th><th>Multiplier</th><th>Points</th><th>Running total</th></tr></thead>
     <tbody>
     {% for c in investigation.risk.components %}
       <tr>
         <td>{{ c.label }}<br><span class="muted">{{ c.detail }}</span></td>
+        <td class="mono muted">{{ c.group or '-' }}</td>
         <td class="mono">{{ c.weight }}</td>
         <td class="mono">&times;{{ c.multiplier }}</td>
         <td class="mono">+{{ c.points }}</td>
@@ -167,22 +231,28 @@
     </tbody>
   </table>
   </div>
-  <p class="sub">Weights are configurable (<code>Config.weights</code>); repeated findings of
-  the same type decay so one noisy detector cannot dominate the score.</p>
+  <p class="sub">Raw total <strong>{{ investigation.risk.raw_score }}</strong>
+  &rarr; normalized <strong>{{ investigation.risk.normalized_score }}/100</strong>
+  ({{ investigation.risk.findings_counted }} findings across
+  {{ investigation.risk.groups_counted }} behaviour groups).
+  Weights are configurable (<code>Config.weights</code>); findings within the same
+  behaviour group decay (&times;1, &times;&frac12;, &times;&#8531; &hellip;) so several
+  manifestations of one underlying activity cannot inflate the score.</p>
 </section>
 
 <!-- ============================ FINDINGS -->
 <section>
-  <h2>Findings ({{ findings|length }})</h2>
+  <h2>Detailed findings ({{ findings|length }})</h2>
   {% if not findings %}
     <p class="muted">No behaviour crossed the configured detection thresholds.</p>
   {% endif %}
   {% for f in findings %}
   <div class="finding {{ f.severity }}">
     <div class="head">
-      <span class="badge {{ f.severity }}">{{ f.severity }}</span>
+      <span class="badge {{ f.severity }}">RISK {{ f.risk }}</span>
+      <span class="badge INFO">CONFIDENCE {{ f.confidence_level }}</span>
       <span class="title">{{ f.title }}</span>
-      <span class="sub">{{ (f.confidence * 100)|round|int }}% confidence
+      <span class="sub">{{ (f.confidence * 100)|round|int }}%
         {%- if f.tactic %} &middot; {{ f.tactic }}{% endif %}
         {%- if f.source %} &middot; <code>{{ f.source }}</code>
           {%- if f.destination %} &#8594; <code>{{ f.destination }}</code>{% endif %}
@@ -192,31 +262,43 @@
     <ul class="evidence">
       {% for e in f.evidence %}<li>{{ e.summary }}</li>{% endfor %}
     </ul>
+    {% if f.interpretation %}
+    <div class="why"><strong>Interpretation:</strong> {{ f.interpretation }}</div>
+    {% endif %}
+    {% if f.limitations %}
+    <div class="note"><strong>Limitations:</strong> {{ f.limitations }}</div>
+    {% endif %}
   </div>
   {% endfor %}
 </section>
 
-<!-- ============================ HYPOTHESES -->
+<!-- ============================ CORRELATED INDICATORS -->
 {% if hypotheses %}
 <section>
-  <h2>Correlated hypotheses</h2>
+  <h2>Correlated indicators</h2>
+  <p class="sub">Where several independent behaviour categories converge on the
+  same host, they are assessed together. This is an investigative reading of the
+  observations above - not a proven sequence of events.</p>
   {% for h in hypotheses %}
   <div class="finding {{ h.severity }}">
     <div class="head">
-      <span class="badge {{ h.severity }}">{{ h.severity }}</span>
+      <span class="badge {{ h.severity }}">RISK {{ h.risk }}</span>
+      <span class="badge INFO">CONFIDENCE {{ h.confidence_level }}</span>
       <span class="title">{{ h.title }}</span>
-      <span class="sub">subject <code>{{ h.subject }}</code> &middot; {{ h.confidence_pct }}% confidence</span>
+      <span class="sub">subject <code>{{ h.subject }}</code> &middot; {{ h.confidence_pct }}%</span>
     </div>
     <div class="chain">
-      {% for step in h.attack_chain %}
-        {% if not loop.first %}<span class="arrow">&#8594;</span>{% endif %}
+      {% for step in h.observed_behavior %}
         <span class="step">{{ step }}</span>
       {% endfor %}
     </div>
     <div class="why">{{ h.explanation }}</div>
+    {% if h.sequence_notes %}
+    <p class="sub">Observed sequence (ordering only, not causation):</p>
     <ul class="evidence">
-      {% for c in h.correlations %}<li>{{ c }}</li>{% endfor %}
+      {% for c in h.sequence_notes %}<li>{{ c }}</li>{% endfor %}
     </ul>
+    {% endif %}
   </div>
   {% endfor %}
 </section>
@@ -398,6 +480,44 @@
   </div>
   {% endfor %}
 </section>
+
+<!-- ============================ LIMITATIONS -->
+{% if investigation.limitations %}
+<section>
+  <h2>Limitations</h2>
+  <p class="sub">What this analysis could <em>not</em> establish. Read the
+  conclusions above against these constraints.</p>
+  <ul class="evidence">
+    {% for limitation in investigation.limitations %}
+    <li>{{ limitation }}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<!-- ============================ RECOMMENDED NEXT STEPS -->
+{% if investigation.recommended_steps %}
+<section>
+  <h2>Recommended investigation steps</h2>
+  <p class="sub">Each step is tied to an indicator actually observed in this
+  capture. These are investigative actions only - containment decisions require
+  organisational context this tool does not have.</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>#</th><th>Step</th><th>Why</th></tr></thead>
+    <tbody>
+    {% for r in investigation.recommended_steps %}
+      <tr>
+        <td class="mono">{{ loop.index }}</td>
+        <td>{{ r.step }}</td>
+        <td class="muted">{{ r.rationale }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
 
 <footer>
   pcap-investigator v{{ tool.version }} &middot; offline analysis, no external services

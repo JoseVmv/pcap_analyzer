@@ -11,7 +11,11 @@ from investigator.detectors.base import DetectionContext, Detector
 from investigator.detectors.beaconing import BeaconingDetector, ContactSeriesTracker
 from investigator.detectors.bursts import TrafficBurstDetector, TrafficRateTracker
 from investigator.detectors.dns_anomaly import DnsAnomalyDetector
-from investigator.detectors.exfiltration import DataExfiltrationDetector
+from investigator.detectors.exfiltration import (
+    DataExfiltrationDetector,
+    DataTransferDetector,
+)
+from investigator.detectors.http_anomaly import HttpAnomalyDetector
 from investigator.detectors.lateral import HostDiscoveryDetector, LateralMovementDetector
 from investigator.detectors.rare_destination import RareDestinationDetector
 from investigator.detectors.scanning import PortScanDetector
@@ -22,11 +26,12 @@ DEFAULT_DETECTORS: list[Detector] = [
     PortScanDetector(),
     HostDiscoveryDetector(),
     BeaconingDetector(),
+    HttpAnomalyDetector(),
     DnsAnomalyDetector(),
     RareDestinationDetector(),
     UnusualPortDetector(),
     TrafficBurstDetector(),
-    DataExfiltrationDetector(),
+    DataTransferDetector(),
     LateralMovementDetector(),
 ]
 
@@ -52,6 +57,8 @@ __all__ = [
     "TrafficBurstDetector",
     "DnsAnomalyDetector",
     "DataExfiltrationDetector",
+    "DataTransferDetector",
+    "HttpAnomalyDetector",
     "HostDiscoveryDetector",
     "LateralMovementDetector",
     "RareDestinationDetector",

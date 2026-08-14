@@ -132,8 +132,25 @@ O relatório embute strings controláveis por um atacante: nomes DNS, SNI de TLS
 | Rare destination | contatado por um único host interno | severidade limitada a MEDIUM; confiança só sobe com corroboração |
 | Unusual port | sessão real (não sonda) em porta atípica | compara com o baseline de portas da própria captura |
 | Traffic burst | mediana + k·MAD (robusto a outliers) | piso absoluto de bytes; janelas adjacentes são fundidas |
-| Data exfiltration | razão upload/download invertida | compara com a mediana de upload dos outros hosts internos |
+| Transferência de saída | avaliação **em três níveis** (ver abaixo) | só chega a "indicador de exfiltração" com ≥2 evidências além de volume e direção |
+| HTTP periódico | CV dos intervalos entre requisições | exige mínimo de requisições; User-Agent legado entra só como sinal contextual fraco |
 | Lateral movement | sessões administrativas **estabelecidas** em N hosts | ignora SYNs sem resposta — isso é scan, não movimento lateral |
+
+### Transferência ≠ exfiltração: a avaliação em níveis
+
+A regra central: **volume sozinho nunca é exfiltração**. Uma transferência grande pode ser backup, atualização, upload de vídeo, sincronização, varredura ou roubo de dados — e a captura normalmente não distingue, porque o conteúdo é inacessível ou cifrado.
+
+Por isso o detector é escalonado, e só promove ao nível seguinte quando há evidência independente adicional:
+
+| Nível | Exige | Risco |
+|---|---|---|
+| `large_transfer` | volume acima do piso | LOW |
+| `outbound_data_transfer` | + direção dominante de upload | MEDIUM |
+| `potential_exfiltration_indicator` | + ≥2 indicadores corroborantes | HIGH |
+
+Os indicadores corroborantes são: destino raro (só um host interno o contatou), ausência de resolução DNS (conexão direta a IP), POSTs/PUTs HTTP repetidos, volume de resposta desproporcionalmente baixo, e upload muito acima da mediana da própria captura.
+
+Mesmo o nível mais alto se chama *indicador*, nunca conclusão, e carrega sempre a limitação explícita de que o conteúdo do payload não pôde ser estabelecido.
 
 ### Por que o MAD e não só o desvio padrão
 
@@ -143,15 +160,36 @@ O mesmo raciocínio vale para o detector de bursts: o baseline usa mediana + k·
 
 ---
 
-## Correlação e confiança
+## Risco e confiança são eixos independentes
 
-Findings são mapeados para fases de kill-chain (`Reconnaissance`, `External Communication`, `Command & Control`, `Data Collection`, `Exfiltration`, `Lateral Movement`) e agrupados por host. Uma hipótese só nasce quando há **pelo menos duas fases** — um alerta isolado não é uma história.
+Esta é a decisão conceitual mais importante do projeto.
 
-### A narrativa segue a ordem observada
+- **Risco** (`Severity`) responde: *quão grave seria isso se a leitura estiver correta?*
+- **Confiança** (`Confidence`) responde: *quão forte é a evidência que sustenta essa leitura?*
 
-A cadeia de ataque é apresentada na ordem em que as coisas **realmente aconteceram**, não na ordem canônica do kill-chain. Se o movimento lateral veio antes do C2, é assim que o relatório mostra.
+As duas direções são legítimas e comuns numa investigação real. Uma grande transferência de saída é **risco ALTO com confiança BAIXA** de ser exfiltração — o comportamento preocupa, mas o conteúdo do payload é inacessível. Um port scan de manual é **risco MÉDIO com confiança ALTA** — o comportamento é inconfundível, mas raramente é o incidente em si.
 
-Por quê: isto é uma reconstrução do que ocorreu, não um diagrama de livro-texto. Um campo separado (`chronological`) registra se a ordem observada bateu com a progressão esperada — e é isso, não a narrativa, que rende o bônus de confiança.
+Versões anteriores derivavam severidade da confiança (`Severity.from_confidence()`), o que colapsava os dois eixos e destruía exatamente a nuance de que o analista precisa. Esse método ainda existe, marcado como deprecated, para não quebrar código externo; detectores novos declaram risco explicitamente.
+
+## Correlação: observação, interpretação, hipótese
+
+O sistema mantém três níveis rigorosamente separados:
+
+| Nível | Estrutura | O que afirma |
+|---|---|---|
+| **Comportamento observado** | `BehaviorGroup` | o que os pacotes mostram, agrupado por categoria. Nenhuma alegação causal. |
+| **Indicadores correlacionados** | `HostRiskProfile` | várias categorias atribuíveis ao mesmo host. Consolidado, ainda não causal. |
+| **Hipótese** | `Hypothesis` | leitura investigativa da combinação, sempre hedged e rastreável aos findings. |
+
+### Por que a "attack chain" com setas foi removida
+
+Um diagrama `A → B → C` afirma que A *causou* B. Uma captura não estabelece causação — apenas coocorrência e ordenação. O relatório agora apresenta **categorias de comportamento observado**, sem setas.
+
+A ordenação cronológica continua sendo medida e reportada (campo `chronological`, mais as frases de sequência), porque é informação corroborante genuína — mas rotulada como *sequência*, nunca como causalidade. Há um teste que varre a saída em busca de asserções causais ("led to", "resulted in", "consequently") e falha se alguma aparecer.
+
+As categorias também são nomeadas em nível de observação: "Network Discovery / Scanning" em vez de "Reconnaissance", "Periodic / Automated Communication" em vez de "Command & Control". O rótulo interpretativo continua disponível (`interpretive_label`), usado só onde a interpretação está explicitamente sinalizada.
+
+Um detalhe que um teste capturou: `traffic_burst` estava categorizado como "Potential Outbound Data Transfer", o que afirmava direção — exatamente o que o detector de burst declara não conseguir determinar. Bursts agora têm categoria própria, "Traffic Volume Anomalies".
 
 ### Agregação de confiança
 
@@ -171,13 +209,28 @@ O teto é 0.98, nunca 1.0: uma captura mostra comportamento, não intenção.
 
 Cada finding contribui com `peso × confiança`, onde o peso vem de `config.weights`.
 
-**Retornos decrescentes por tipo repetido.** A segunda ocorrência do mesmo tipo vale metade, a terceira um terço, e assim por diante. Sem isso, um detector ruidoso dominaria o score inteiro. As ocorrências são processadas da mais forte para a mais fraca, então o decaimento penaliza as repetições menos relevantes.
+### O score não é uma probabilidade
 
-**Bônus de correlação.** Uma cadeia coerente de múltiplas fases é evidência mais forte que a soma das partes, então a melhor hipótese adiciona um bônus escalado pela própria confiança.
+`92/100` não significa "92% de chance de comprometimento". Significa que os indicadores ponderados e deduplicados acumularam 92 pontos numa escala cujo topo é atingido por qualquer combinação suficientemente severa. Por isso **dois números são reportados**:
 
-**Teto de 100**, e o fato de ter batido no teto é reportado como uma linha explícita do detalhamento.
+- `raw_score` — a acumulação sem limite, para que uma execução que ultrapassa muito o teto seja visivelmente diferente de uma que apenas o alcança;
+- `normalized_score` — o valor 0–100 de apresentação.
 
-Cada parcela vira um `ScoreComponent` com rótulo, peso, multiplicador, pontos e total acumulado — é isso que permite imprimir a aritmética completa no terminal e no HTML.
+No PCAP real de exercício, por exemplo, o raw é 155.02 e o normalizado é 100/100 — a diferença agora fica explícita em vez de escondida. O JSON carrega `"is_probability": false` e uma frase de interpretação, e o campo `capped` diz que o teto marca "combinação severa de indicadores", não certeza.
+
+### Deduplicação por grupo de comportamento
+
+O maior risco ao significado de um score é a contagem dupla. Os retornos decrescentes não são aplicados por *tipo* de finding, e sim por **grupo de comportamento** (`Finding.group_key`, por padrão `tipo:host`).
+
+Três findings de "comunicação periódica" do mesmo host para três destinos são três evidências de **uma** atividade, e são pontuados como tal: peso cheio para o mais forte, depois ×½, ×⅓ e assim por diante. As ocorrências são processadas da mais forte para a mais fraca, então o decaimento penaliza as repetições menos relevantes. No caso real, 25 findings de HTTP periódico colapsaram em um único grupo.
+
+**Bônus de correlação.** Uma combinação coerente de múltiplas categorias é evidência mais forte que a soma das partes, então a melhor hipótese adiciona um bônus escalado pela própria confiança.
+
+### Confiança do score é calculada à parte
+
+`RiskScore.confidence` não deriva do total de pontos. Ela é ancorada na melhor conclusão disponível — a hipótese correlacionada, se houver — e um finding isolado tem a confiança **limitada a 0.75**, porque uma conclusão não corroborada é intrinsecamente mais fraca que uma cadeia correlacionada.
+
+Cada parcela vira um `ScoreComponent` com rótulo, grupo, peso, multiplicador, pontos e total acumulado — é isso que permite imprimir a aritmética completa no terminal e no HTML.
 
 ---
 

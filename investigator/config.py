@@ -42,10 +42,18 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "dns_tunneling": 20.0,
     "dns_anomaly": 10.0,
     "beaconing": 25.0,
+    "http_beaconing": 22.0,
+    "http_anomaly": 6.0,
     "rare_destination": 10.0,
     "unusual_port": 8.0,
-    "traffic_burst": 8.0,
-    "data_exfiltration": 20.0,
+    # A burst is a volume observation, not an attack stage - weighted low.
+    "traffic_burst": 5.0,
+    # Tiered transfer assessment: weight grows with how much corroborating
+    # evidence the tier required.
+    "large_transfer": 3.0,
+    "outbound_data_transfer": 10.0,
+    "potential_exfiltration_indicator": 20.0,
+    "data_exfiltration": 20.0,   # legacy type name, kept for compatibility
     "lateral_movement": 18.0,
 }
 
@@ -92,10 +100,30 @@ class Config:
     beacon_common_port_penalty: float = 0.20   # common service port
     beacon_infra_port_penalty: float = 0.50    # inherently periodic protocol
 
-    # -- data transfer / exfiltration (V5) --------------------------------
-    exfil_min_bytes: int = 1_000_000      # 1 MB outbound floor to consider
-    exfil_out_in_ratio: float = 3.0       # sent >> received
+    # -- outbound data transfer (tiered assessment) -----------------------
+    # Tier 1 (large_transfer): volume above this floor.
+    transfer_min_bytes: int = 1_000_000   # 1 MB outbound floor to consider
+    # Tier 2 (outbound_data_transfer): also upload-dominant.
+    transfer_out_in_ratio: float = 3.0    # sent >> received
+    # Tier 3 (potential_exfiltration_indicator): also corroborated by at
+    # least this many independent indicators beyond volume and direction.
+    exfil_min_indicators: int = 2
     exfil_baseline_multiple: float = 5.0  # vs median internal host upload
+    exfil_min_uploads: int = 3            # repeated HTTP POST/PUT requests
+    exfil_low_response_ratio: float = 20.0  # sent/received considered "low reply"
+
+    # -- HTTP anomaly analysis --------------------------------------------
+    http_min_requests_for_pattern: int = 5
+    http_beacon_cv: float = 0.25          # request-interval regularity
+    http_low_response_ratio: float = 10.0
+    #: User-Agent substrings whose age/shape makes them contextually odd.
+    #: Never proof of anything - they raise a *contextual* flag only.
+    http_legacy_agents: tuple[str, ...] = (
+        "MSIE", "Windows NT 5.", "Windows NT 6.0", "Windows NT 6.1",
+        "Windows NT 6.2", "Windows NT 6.3", "Trident/", "Firefox/3",
+        "Firefox/4", "Chrome/4", "Chrome/5", "Java/1.", "python-requests",
+        "curl/", "Wget/", "WinHTTP", "Mozilla/4.",
+    )
 
     # -- lateral movement (V5) --------------------------------------------
     lateral_min_targets: int = 3          # internal hosts reached on admin ports
