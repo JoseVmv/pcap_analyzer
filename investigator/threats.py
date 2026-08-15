@@ -26,6 +26,15 @@ TACTICS: dict[str, str] = {
     "traffic_burst": "Collection",
     "data_exfiltration": "Exfiltration",
     "lateral_movement": "Lateral Movement",
+    "icmp_sweep": "Discovery",
+    "icmp_tunneling": "Command & Control",
+    "tls_no_sni": "Command & Control",
+    "tls_unresolved_sni": "Command & Control",
+    "tls_rare_fingerprint": "Command & Control",
+    # Poisoning the address bindings of a segment is how an attacker gets
+    # into the path of traffic - credentials and sessions included.
+    "arp_spoofing": "Credential Access",
+    "arp_mac_flooding": "Credential Access",
 }
 
 # One-line description of what the behaviour class means, shown in reports.
@@ -38,6 +47,10 @@ TACTIC_DESCRIPTIONS: dict[str, str] = {
     "Collection": "Gathering or staging data before it is moved.",
     "Exfiltration": "Moving data out of the network to an external destination.",
     "Lateral Movement": "Reaching further internal hosts from an initial foothold.",
+    "Credential Access": (
+        "Positioning to observe traffic that other hosts believe is going "
+        "somewhere else."
+    ),
 }
 
 

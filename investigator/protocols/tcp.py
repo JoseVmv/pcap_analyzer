@@ -29,6 +29,13 @@ LOG = logging.getLogger(__name__)
 
 FlowKey = tuple[tuple[str, int], tuple[str, int]]
 
+#: Flows tracked simultaneously.  A vertical scan creates one flow per port
+#: probed and a horizontal scan one per target, so this table grows fastest
+#: on exactly the traffic the tool is built to find.  Past the limit new
+#: flows are counted but not stored, and the state counters below stay
+#: honest about how many were left out.
+MAX_TRACKED_FLOWS = 400_000
+
 
 class TcpState(str, enum.Enum):
     HALF_OPEN = "half-open"        # SYN seen, no SYN/ACK
@@ -103,6 +110,12 @@ class TcpFlowTracker:
 
     def __init__(self) -> None:
         self.flows: dict[FlowKey, TcpFlow] = {}
+        #: 4-tuples first seen after the table was full.  Their packets are
+        #: not attributed to any flow, so detection that reads flow state
+        #: (scanning, lateral movement) degrades past this point - which is
+        #: why the number is reported rather than hidden.
+        self.untracked_flows = 0
+        self.untracked_flow_packets = 0
 
     @staticmethod
     def _key(event: NetworkEvent) -> FlowKey:
@@ -126,6 +139,10 @@ class TcpFlowTracker:
         flow = self.flows.get(key)
 
         if flow is None:
+            if len(self.flows) >= MAX_TRACKED_FLOWS:
+                self.untracked_flows += 1
+                self.untracked_flow_packets += 1
+                return
             syn_only = TcpFlags.SYN in flags and TcpFlags.ACK not in flags
             if syn_only:
                 flow = TcpFlow(
@@ -239,6 +256,9 @@ class TcpFlowTracker:
     def as_dict(self) -> dict[str, object]:
         return {
             "flow_count": len(self.flows),
+            "flows_capped": len(self.flows) >= MAX_TRACKED_FLOWS,
+            "untracked_flows": self.untracked_flows,
+            "untracked_flow_packets": self.untracked_flow_packets,
             "states": dict(self.state_counts().most_common()),
             "half_open_by_client": dict(self.half_open_by_client().most_common(20)),
             "retransmissions": sum(

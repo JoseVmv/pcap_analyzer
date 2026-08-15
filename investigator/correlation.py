@@ -45,20 +45,22 @@ class Phase(enum.IntEnum):
     """
 
     RECON = 1
-    EXTERNAL_COMM = 2
-    DNS_ANOMALY = 3
-    C2 = 4
-    CLIENT_ANOMALY = 5
-    COLLECTION = 6
-    VOLUME_ANOMALY = 7
-    EXFIL = 8
-    LATERAL = 9
+    LINK_LAYER = 2
+    EXTERNAL_COMM = 3
+    DNS_ANOMALY = 4
+    C2 = 5
+    CLIENT_ANOMALY = 6
+    COLLECTION = 7
+    VOLUME_ANOMALY = 8
+    EXFIL = 9
+    LATERAL = 10
 
     @property
     def label(self) -> str:
         """Neutral, observation-level name used in behavioural summaries."""
         return {
             Phase.RECON: "Network Discovery / Scanning",
+            Phase.LINK_LAYER: "Local Segment Addressing Anomalies",
             Phase.EXTERNAL_COMM: "Suspicious External Destinations",
             Phase.DNS_ANOMALY: "DNS Anomalies",
             Phase.C2: "Periodic / Automated Communication",
@@ -74,6 +76,7 @@ class Phase(enum.IntEnum):
         """Kill-chain reading, used only where interpretation is signposted."""
         return {
             Phase.RECON: "Reconnaissance",
+            Phase.LINK_LAYER: "Possible Traffic Interception",
             Phase.EXTERNAL_COMM: "External Communication",
             Phase.DNS_ANOMALY: "Possible Name-Resolution Abuse",
             Phase.C2: "Possible Command & Control",
@@ -112,6 +115,20 @@ TYPE_TO_PHASE: dict[str, Phase] = {
     "potential_exfiltration_indicator": Phase.EXFIL,
     "data_exfiltration": Phase.EXFIL,
     "lateral_movement": Phase.LATERAL,
+    "icmp_sweep": Phase.RECON,
+    "icmp_tunneling": Phase.C2,
+    # A hostname reached without a resolution that justifies it, or with no
+    # hostname at all, describes the *destination* rather than the client's
+    # rhythm - so it belongs with the other destination-quality signals and
+    # not in the periodic-communication category.
+    "tls_no_sni": Phase.EXTERNAL_COMM,
+    "tls_unresolved_sni": Phase.EXTERNAL_COMM,
+    # The fingerprint says which software is calling, which is exactly the
+    # question the client-characteristics category answers.
+    "tls_rare_fingerprint": Phase.CLIENT_ANOMALY,
+    "tls_legacy_version": Phase.CLIENT_ANOMALY,
+    "arp_spoofing": Phase.LINK_LAYER,
+    "arp_mac_flooding": Phase.LINK_LAYER,
 }
 
 

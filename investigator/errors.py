@@ -34,3 +34,18 @@ class UnsupportedCaptureFormatError(CaptureFileError):
 
 class CorruptCaptureFileError(CaptureFileError):
     """The file looks like a capture but cannot be read."""
+
+
+class ConfigError(InvestigatorError):
+    """A problem with a user-supplied configuration file.
+
+    Raised for an unreadable file, an unknown setting or a value of the
+    wrong type.  Unknown keys are errors rather than warnings on purpose:
+    a silently ignored typo in a threshold would change what the tool
+    detects while looking like it had been applied.
+    """
+
+    def __init__(self, path: Path | str, reason: str) -> None:
+        self.path = Path(path)
+        self.reason = reason
+        super().__init__(f"{self.path}: {reason}")

@@ -13,6 +13,7 @@ not reassembled in V2; it increments ``fragmented_hellos``.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import struct
 from collections import Counter
@@ -38,6 +39,19 @@ _MAX_RECORDS = 50_000
 
 def _version_name(raw: int) -> str:
     return VERSION_NAMES.get(raw, f"0x{raw:04x}")
+
+
+def is_grease(value: int) -> bool:
+    """True for a GREASE code point (RFC 8701).
+
+    GREASE values are deliberately *random* placeholders that clients
+    insert into cipher and extension lists to keep middleboxes tolerant of
+    unknown values.  They change between connections from the same client,
+    so leaving them in would make the fingerprint below differ every time
+    and defeat its entire purpose.  The reserved values all follow the
+    pattern ``0x?a?a`` with both bytes equal.
+    """
+    return (value & 0x0F0F) == 0x0A0A and (value >> 8) == (value & 0xFF)
 
 
 class _Cursor:
@@ -76,6 +90,51 @@ class ClientHello:
     supported_versions: list[str] = field(default_factory=list)
     alpn: list[str] = field(default_factory=list)
     cipher_count: int = 0
+    #: Raw handshake version and the ordered code-point lists the
+    #: fingerprint is built from (GREASE already removed).
+    legacy_version_raw: int = 0
+    ciphers: list[int] = field(default_factory=list)
+    extensions: list[int] = field(default_factory=list)
+    curves: list[int] = field(default_factory=list)
+    point_formats: list[int] = field(default_factory=list)
+
+    @property
+    def ja3_string(self) -> str:
+        """The client's TLS stack, expressed as ordered code points.
+
+        This is the JA3 construction: version, ciphers, extensions, curves
+        and point formats, each ``-``-joined and separated by commas.  What
+        makes it useful is that the *ordering* is decided by the client
+        implementation, not by the server or the network - so two hosts
+        running the same TLS library produce the same string, and a client
+        that is not the browser it claims to be produces a different one
+        from every real browser.
+
+        No external database is involved: the value is only ever compared
+        against other fingerprints observed in this same capture, which
+        keeps the project's "baseline comes from the capture" rule intact.
+        """
+        return ",".join(
+            (
+                str(self.legacy_version_raw),
+                "-".join(str(c) for c in self.ciphers),
+                "-".join(str(e) for e in self.extensions),
+                "-".join(str(c) for c in self.curves),
+                "-".join(str(p) for p in self.point_formats),
+            )
+        )
+
+    @property
+    def ja3(self) -> str:
+        """MD5 of :attr:`ja3_string`, as the JA3 specification defines it.
+
+        MD5 is used because the format specifies it and the value is an
+        identifier, never a security control - collision resistance is not
+        a property this relies on.
+        """
+        return hashlib.md5(
+            self.ja3_string.encode("ascii", errors="replace")
+        ).hexdigest()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -88,6 +147,7 @@ class ClientHello:
             "supported_versions": self.supported_versions,
             "alpn": self.alpn,
             "cipher_count": self.cipher_count,
+            "ja3": self.ja3,
             "observation": "observed",
         }
 
@@ -125,7 +185,7 @@ def parse_client_hello(payload: bytes, event: NetworkEvent) -> ClientHello:
     cursor.skip(32)                     # client random
     cursor.skip(cursor.u8())            # session id
     cipher_len = cursor.u16()
-    cursor.skip(cipher_len)
+    cipher_bytes = cursor.take(cipher_len)
     cursor.skip(cursor.u8())            # compression methods
 
     hello = ClientHello(
@@ -136,7 +196,15 @@ def parse_client_hello(payload: bytes, event: NetworkEvent) -> ClientHello:
         sni=None,
         legacy_version=_version_name(legacy_version),
         cipher_count=cipher_len // 2,
+        legacy_version_raw=legacy_version,
     )
+    # Offered ciphers, in the client's own order - that ordering is what
+    # makes the fingerprint identify an implementation.
+    hello.ciphers = [
+        value
+        for (value,) in struct.iter_unpack("!H", cipher_bytes[: (cipher_len // 2) * 2])
+        if not is_grease(value)
+    ]
 
     if cursor.pos + 2 > len(payload):
         return hello                    # legacy hello without extensions
@@ -146,12 +214,23 @@ def parse_client_hello(payload: bytes, event: NetworkEvent) -> ClientHello:
         ext_type = cursor.u16()
         ext_len = cursor.u16()
         body = _Cursor(cursor.take(ext_len))
+        if not is_grease(ext_type):
+            hello.extensions.append(ext_type)
         if ext_type == 0:               # server_name
             body.skip(2)                # server name list length
             if body.u8() == 0:          # name type: host_name
                 hello.sni = body.take(body.u16()).decode(
                     "ascii", errors="replace"
                 ).lower()
+        elif ext_type == 10:            # supported_groups (elliptic curves)
+            count = body.u16() // 2
+            for _ in range(count):
+                value = body.u16()
+                if not is_grease(value):
+                    hello.curves.append(value)
+        elif ext_type == 11:            # ec_point_formats
+            for _ in range(body.u8()):
+                hello.point_formats.append(body.u8())
         elif ext_type == 16:            # ALPN
             body.skip(2)
             while body.pos < len(body.data):
@@ -207,6 +286,13 @@ class TlsAnalyzer:
         self.version_counter: Counter = Counter()
         self.hellos_without_sni = 0
         self.fragmented_hellos = 0
+        #: fingerprint -> which clients used it, and which destinations it
+        #: reached.  Counted for every hello, so these stay exact even after
+        #: ``client_hellos`` stops storing records at ``_MAX_RECORDS``.
+        self.ja3_clients: dict[str, set[str]] = {}
+        self.ja3_destinations: dict[str, set[str]] = {}
+        self.ja3_counter: Counter = Counter()
+        self.client_ja3: dict[str, set[str]] = {}
 
     def observe_packet(self, event: NetworkEvent, packet: Packet) -> None:
         if event.protocol is not Protocol.TCP or event.payload_bytes <= 0:
@@ -228,6 +314,13 @@ class TlsAnalyzer:
                     self.sni_counter[hello.sni] += 1
                 else:
                     self.hellos_without_sni += 1
+                fingerprint = hello.ja3
+                self.ja3_counter[fingerprint] += 1
+                self.ja3_clients.setdefault(fingerprint, set()).add(hello.src_ip)
+                self.ja3_destinations.setdefault(fingerprint, set()).add(
+                    hello.dst_ip
+                )
+                self.client_ja3.setdefault(hello.src_ip, set()).add(fingerprint)
             elif handshake_type == 0x02:
                 server_hello = parse_server_hello(payload, event)
                 if len(self.server_hellos) < _MAX_RECORDS:
@@ -244,6 +337,19 @@ class TlsAnalyzer:
             h.sni for h in self.client_hellos if h.dst_ip == dst_ip and h.sni
         }
 
+    def rare_fingerprints(self, max_clients: int) -> list[str]:
+        """Fingerprints used by at most ``max_clients`` hosts here.
+
+        Rarity is measured strictly inside this capture: a fingerprint is
+        "rare" because few hosts on this network produced it, not because
+        it is absent from some external corpus.
+        """
+        return [
+            fingerprint
+            for fingerprint, clients in self.ja3_clients.items()
+            if len(clients) <= max_clients
+        ]
+
     def as_dict(self) -> dict[str, object]:
         return {
             "client_hello_count": len(self.client_hellos),
@@ -252,6 +358,16 @@ class TlsAnalyzer:
             "negotiated_versions": dict(self.version_counter.most_common()),
             "hellos_without_sni": self.hellos_without_sni,
             "fragmented_hellos": self.fragmented_hellos,
+            "fingerprints": {
+                fingerprint: {
+                    "hellos": count,
+                    "clients": sorted(self.ja3_clients.get(fingerprint, set())),
+                    "destination_count": len(
+                        self.ja3_destinations.get(fingerprint, set())
+                    ),
+                }
+                for fingerprint, count in self.ja3_counter.most_common(50)
+            },
             "client_hellos": [h.as_dict() for h in self.client_hellos[:200]],
             "server_hellos": [h.as_dict() for h in self.server_hellos[:200]],
         }

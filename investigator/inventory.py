@@ -32,6 +32,24 @@ from investigator.models import NetworkEvent, Protocol
 # growing (counters keep counting).  200k doubles = ~1.6 MiB worst case.
 MAX_TIMESTAMPS_PER_CONVERSATION = 200_000
 
+# Bounds on the tables that would otherwise grow with the *shape* of the
+# traffic rather than with the size of the capture.
+#
+# These matter precisely because the worst case is the behaviour this tool
+# exists to detect: a horizontal scan creates one host entry and one
+# conversation per address touched, and a vertical scan fans a single peer
+# out across every port.  Without a ceiling, the adversarial input is also
+# the input that exhausts memory.
+#
+# As everywhere else in this project, hitting a limit is recorded, never
+# silent: the counters below keep counting after the tables stop growing,
+# so a report can always say how much was left out.
+MAX_TRACKED_HOSTS = 200_000
+MAX_TRACKED_CONVERSATIONS = 500_000
+#: Distinct peers remembered per host.  Beyond this ``peer_count`` becomes
+#: a floor rather than an exact count, flagged by ``peers_overflow``.
+MAX_PEERS_PER_HOST = 10_000
+
 
 class HostKind(str, enum.Enum):
     INTERNAL = "internal"
@@ -42,6 +60,11 @@ class HostKind(str, enum.Enum):
 
 
 _ip_kind_cache: dict[str, HostKind] = {}
+#: The cache is a pure speed optimisation over a deterministic function, so
+#: it can be dropped wholesale once it grows past what a capture plausibly
+#: needs.  Bounding it keeps a long-lived process (a test session, a batch
+#: runner) from accumulating every address it has ever seen.
+_IP_CACHE_LIMIT = 300_000
 
 # Explicit "internal network" ranges instead of ipaddress.is_private: newer
 # Python versions extended is_private to the whole IANA special-purpose
@@ -83,6 +106,8 @@ def classify_ip(ip: str) -> HostKind:
             kind = HostKind.INTERNAL
         else:
             kind = HostKind.EXTERNAL
+    if len(_ip_kind_cache) >= _IP_CACHE_LIMIT:
+        _ip_kind_cache.clear()
     _ip_kind_cache[ip] = kind
     return kind
 
@@ -106,6 +131,17 @@ class HostProfile:
     ports_served: Counter = field(default_factory=Counter)         # as destination
     protocols: Counter = field(default_factory=Counter)
     macs: set[str] = field(default_factory=set)
+    #: True once ``peers`` stopped growing; ``peer_count`` is then a floor.
+    peers_overflow: bool = False
+
+    def add_peer(self, ip: str) -> None:
+        """Remember a peer, up to :data:`MAX_PEERS_PER_HOST`."""
+        if ip in self.peers:
+            return
+        if len(self.peers) >= MAX_PEERS_PER_HOST:
+            self.peers_overflow = True
+            return
+        self.peers.add(ip)
 
     def _touch(self, timestamp: float) -> None:
         if self.first_seen is None or timestamp < self.first_seen:
@@ -157,6 +193,7 @@ class HostProfile:
             "last_seen": self.last_seen,
             "silent": self.is_silent,
             "peer_count": len(self.peers),
+            "peers_overflow": self.peers_overflow,
             "peers": sorted(self.peers),
             "dst_ports_contacted": dict(self.dst_ports_contacted.most_common()),
             "ports_served": dict(self.ports_served.most_common()),
@@ -224,12 +261,22 @@ class NetworkInventory:
         self.global_dst_ports: Counter = Counter()
         self.global_src_ports: Counter = Counter()
         self.protocol_counts: Counter = Counter()
+        #: Events involving an address that arrived after the host table was
+        #: full.  Their protocol and port counts are still recorded.
+        self.untracked_host_events = 0
+        #: Events belonging to an edge that arrived after the conversation
+        #: table was full.
+        self.untracked_conversation_events = 0
 
-    def _host(self, ip: str) -> HostProfile:
+    def _host(self, ip: str) -> HostProfile | None:
+        """Profile for ``ip``, or ``None`` once the host table is full."""
         profile = self.hosts.get(ip)
-        if profile is None:
-            profile = HostProfile(ip=ip, kind=classify_ip(ip))
-            self.hosts[ip] = profile
+        if profile is not None:
+            return profile
+        if len(self.hosts) >= MAX_TRACKED_HOSTS:
+            return None
+        profile = HostProfile(ip=ip, kind=classify_ip(ip))
+        self.hosts[ip] = profile
         return profile
 
     def observe(self, event: NetworkEvent) -> None:
@@ -237,21 +284,31 @@ class NetworkInventory:
         if event.src_ip is None or event.dst_ip is None:
             return  # NON_IP frames carry no addressing we can inventory
 
-        src = self._host(event.src_ip)
-        dst = self._host(event.dst_ip)
-        src.record_sent(event)
-        dst.record_received(event)
-        src.peers.add(event.dst_ip)
-        dst.peers.add(event.src_ip)
-
+        # Global port counters stay exact regardless of table pressure: they
+        # are the capture-wide baseline other detectors measure against, and
+        # they cost one integer each.
         if event.src_port is not None:
             self.global_src_ports[event.src_port] += 1
         if event.dst_port is not None:
             self.global_dst_ports[event.dst_port] += 1
 
+        src = self._host(event.src_ip)
+        dst = self._host(event.dst_ip)
+        if src is None or dst is None:
+            self.untracked_host_events += 1
+        if src is not None:
+            src.record_sent(event)
+            src.add_peer(event.dst_ip)
+        if dst is not None:
+            dst.record_received(event)
+            dst.add_peer(event.src_ip)
+
         key = (event.src_ip, event.dst_ip)
         conversation = self.conversations.get(key)
         if conversation is None:
+            if len(self.conversations) >= MAX_TRACKED_CONVERSATIONS:
+                self.untracked_conversation_events += 1
+                return
             conversation = Conversation(src_ip=event.src_ip, dst_ip=event.dst_ip)
             self.conversations[key] = conversation
         conversation.record(event)
@@ -298,4 +355,16 @@ class NetworkInventory:
             "global_dst_ports": dict(self.global_dst_ports.most_common(50)),
             "global_src_ports": dict(self.global_src_ports.most_common(50)),
             "protocols": dict(self.protocol_counts.most_common()),
+            "limits": {
+                "hosts_tracked": len(self.hosts),
+                "hosts_capped": len(self.hosts) >= MAX_TRACKED_HOSTS,
+                "untracked_host_events": self.untracked_host_events,
+                "conversations_tracked": len(self.conversations),
+                "conversations_capped": (
+                    len(self.conversations) >= MAX_TRACKED_CONVERSATIONS
+                ),
+                "untracked_conversation_events": (
+                    self.untracked_conversation_events
+                ),
+            },
         }

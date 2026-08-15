@@ -26,6 +26,15 @@ LOG = logging.getLogger(__name__)
 _BANNER_WIDTH = 40
 _PROGRESS_EVERY = 100_000
 
+#: Exit code used when ``--fail-on`` is satisfied.  Deliberately distinct
+#: from 0 (clean), 1 (investigation error), 2 (argparse usage error) and
+#: 130 (interrupted), so automation can tell "found something" apart from
+#: "could not run".
+_EXIT_THRESHOLD_MET = 20
+
+#: Risk bands ordered by seriousness, for comparing against ``--fail-on``.
+_BAND_ORDER = ["MINIMAL", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
 
 def _positive_int(value: str) -> int:
     try:
@@ -62,6 +71,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="reports",
         metavar="DIR",
         help="directory for generated reports (default: reports)",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="FILE",
+        help=(
+            "TOML or JSON file overriding detection thresholds and score "
+            "weights (see investigator/config.py for every setting)"
+        ),
+    )
+    parser.add_argument(
+        "--fail-on",
+        choices=["low", "medium", "high", "critical"],
+        metavar="LEVEL",
+        help=(
+            "exit with code %d when the risk band reaches LEVEL "
+            "(low|medium|high|critical), for use in automation"
+        ) % _EXIT_THRESHOLD_MET,
     )
     parser.add_argument(
         "--top",
@@ -178,6 +204,7 @@ def run(argv: list[str] | None = None) -> int:
     # It also keeps `--help`/`--version` fast: scapy takes a while to load.
     from pathlib import Path
 
+    from investigator.config import load_config
     from investigator.investigation import (
         render_host_profiles_text,
         render_investigation_text,
@@ -200,11 +227,16 @@ def run(argv: list[str] | None = None) -> int:
     from investigator.timeline import render_timeline_text
 
     try:
+        config = load_config(args.config) if args.config else None
+        if config is not None:
+            LOG.info("loaded configuration overrides from %s", args.config)
         loader = PcapLoader(args.capture, max_packets=args.max_packets)
         LOG.info(
             "loading %s (%s)", loader.path, loader.metadata.capture_format.value
         )
-        result = analyze_capture(loader, progress_every=_PROGRESS_EVERY)
+        result = analyze_capture(
+            loader, config, progress_every=_PROGRESS_EVERY
+        )
 
         report = build_report(result)
         output_dir = Path(args.output_dir)
@@ -262,6 +294,17 @@ def run(argv: list[str] | None = None) -> int:
     print("\nReports:")
     for path in written:
         print(f"  {path}")
+
+    if args.fail_on and result.risk is not None:
+        threshold = args.fail_on.upper()
+        band = result.risk.band
+        if _BAND_ORDER.index(band) >= _BAND_ORDER.index(threshold):
+            print(
+                f"\nRisk band {band} reached the --fail-on threshold "
+                f"({threshold}); exiting with code {_EXIT_THRESHOLD_MET}.",
+                file=sys.stderr,
+            )
+            return _EXIT_THRESHOLD_MET
     return 0
 
 

@@ -311,8 +311,33 @@ def render_protocols_text(protocols) -> str:
         top_sni = tls.sni_counter.most_common(1)
         if top_sni:
             line += f", top SNI: {top_sni[0][0]}"
+        if tls.ja3_clients:
+            line += f", {len(tls.ja3_clients)} client fingerprint(s)"
+        if tls.hellos_without_sni:
+            line += f", {tls.hellos_without_sni} without SNI"
         if tls.fragmented_hellos:
             line += f"  ({tls.fragmented_hellos} unparsed/fragmented)"
+        lines.append(line)
+
+    arp = protocols.arp
+    if arp.requests or arp.replies:
+        line = (
+            f"ARP:       {arp.requests} requests, {arp.replies} replies, "
+            f"{len(arp.bindings)} addresses claimed"
+        )
+        conflicts = arp.conflicts()
+        if conflicts:
+            line += f"  ({len(conflicts)} contested)"
+        lines.append(line)
+
+    icmp = protocols.icmp
+    if icmp.total_packets:
+        line = (
+            f"ICMP:      {icmp.total_packets} packets, "
+            f"{len(icmp.channels)} echo channel(s)"
+        )
+        if icmp.total_payload:
+            line += f", {icmp.total_payload:,} B payload"
         lines.append(line)
 
     if not lines:

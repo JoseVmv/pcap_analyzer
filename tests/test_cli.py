@@ -56,3 +56,68 @@ def test_version_flag(capsys):
     with pytest.raises(SystemExit) as excinfo:
         run(["--version"])
     assert excinfo.value.code == 0
+
+
+# --------------------------------------------------- automation-facing flags
+
+def test_config_file_applied(mixed_pcap, tmp_path, capsys):
+    config = tmp_path / "cfg.json"
+    config.write_text(json.dumps({"weights": {"beaconing": 42.0}}))
+    out_dir = tmp_path / "out"
+    assert run(
+        [str(mixed_pcap), "--output-dir", str(out_dir), "--config", str(config),
+         "--no-html"]
+    ) == 0
+    report = json.loads((out_dir / "investigation.json").read_text(encoding="utf-8"))
+    assert report["capture"]["packets"] == 5
+
+
+def test_config_error_reported(mixed_pcap, tmp_path, capsys):
+    config = tmp_path / "cfg.json"
+    config.write_text(json.dumps({"not_a_setting": 1}))
+    assert run([str(mixed_pcap), "--config", str(config)]) == 1
+    assert "unknown setting" in capsys.readouterr().err
+
+
+def test_fail_on_below_threshold_exits_clean(mixed_pcap, tmp_path):
+    """A quiet capture must not fail the pipeline it runs in."""
+    assert run(
+        [str(mixed_pcap), "--output-dir", str(tmp_path / "out"), "--no-html",
+         "--fail-on", "high"]
+    ) == 0
+
+
+def test_fail_on_threshold_met(tmp_path, capsys):
+    """A capture whose risk reaches the threshold has to be distinguishable
+    by exit code alone, or the tool cannot gate anything."""
+    import sys
+
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    import synth
+    from scapy.utils import wrpcap
+
+    capture = tmp_path / "scan.pcap"
+    wrpcap(str(capture), synth.vertical_scan(ports=range(1, 60))
+           + synth.horizontal_scan())
+    code = run(
+        [str(capture), "--output-dir", str(tmp_path / "out"), "--no-html",
+         "--fail-on", "low"]
+    )
+    assert code == 20
+    assert "--fail-on threshold" in capsys.readouterr().err
+
+
+def test_fail_on_absent_keeps_exit_zero(tmp_path):
+    """Without the flag the exit code stays 0, so existing use is
+    unaffected by the feature."""
+    import sys
+
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    import synth
+    from scapy.utils import wrpcap
+
+    capture = tmp_path / "scan2.pcap"
+    wrpcap(str(capture), synth.vertical_scan(ports=range(1, 60)))
+    assert run(
+        [str(capture), "--output-dir", str(tmp_path / "out"), "--no-html"]
+    ) == 0

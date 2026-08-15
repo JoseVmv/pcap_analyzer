@@ -123,20 +123,48 @@ def sniff_format(path: Path | str) -> CaptureMetadata:
     )
 
 
-def _find_icmpv6(packet: Packet) -> Packet | None:
-    """Walk the layer chain looking for any ICMPv6 message.
+# Layer classes we extract, keyed by the *exact* class object.
+#
+# Exact-class matching is deliberate and must not be relaxed to
+# ``isinstance``.  Scapy models the quoted headers inside an ICMP error as
+# subclasses of the originals (``TCPerror(TCP)``, ``IPerror(IP)``), while
+# ``getlayer`` matches exact classes and therefore ignores them.  An
+# isinstance-based walk would match the quoted ``TCPerror`` inside a
+# destination-unreachable message and report the packet as TCP - turning an
+# unreachable notice into a phantom TCP flow.
+_LAYER_KEYS: dict[type, str] = {
+    Ether: "ether",
+    ARP: "arp",
+    IP: "ip",
+    IPv6: "ipv6",
+    TCP: "tcp",
+    UDP: "udp",
+    ICMP: "icmp",
+}
 
-    ICMPv6 has no single Scapy class: every message type (echo, neighbour
-    solicitation...) is its own layer, all deriving from ``_ICMPv6``.
+
+def _walk_layers(packet: Packet) -> dict[str, Packet]:
+    """Collect every layer of interest in a **single** pass of the chain.
+
+    Replaces seven separate ``getlayer`` calls, each of which walked the
+    whole chain again: for a plain TCP-over-Ethernet frame that was about
+    nineteen layer visits per packet, and dissection is the dominant cost
+    of the whole pipeline.
+
+    ICMPv6 is handled separately by ``isinstance`` on purpose: it has no
+    single Scapy class, since every message type (echo, neighbour
+    solicitation...) is its own layer deriving from ``_ICMPv6``.
     """
-    if _ICMPv6 is None:
-        return None
+    found: dict[str, Packet] = {}
     layer: Packet = packet
     while not isinstance(layer, NoPayload):
-        if isinstance(layer, _ICMPv6):
-            return layer
+        key = _LAYER_KEYS.get(layer.__class__)
+        if key is not None:
+            found.setdefault(key, layer)
+        elif _ICMPv6 is not None and isinstance(layer, _ICMPv6):
+            found.setdefault("icmpv6", layer)
         layer = layer.payload
-    return None
+    return found
 
 
 def packet_to_event(packet: Packet) -> NetworkEvent | None:
@@ -156,11 +184,13 @@ def packet_to_event(packet: Packet) -> NetworkEvent | None:
     # back to the dissected length for packets not created by a file reader.
     wire_bytes = getattr(packet, "wirelen", None) or len(packet)
 
-    ether = packet.getlayer(Ether)
+    layers = _walk_layers(packet)
+
+    ether = layers.get("ether")
     src_mac = ether.src if ether is not None else None
     dst_mac = ether.dst if ether is not None else None
 
-    arp = packet.getlayer(ARP)
+    arp = layers.get("arp")
     if arp is not None:
         # ARP carries no IP header, but its sender/target protocol addresses
         # are exactly what host-discovery analysis will need later.
@@ -174,7 +204,9 @@ def packet_to_event(packet: Packet) -> NetworkEvent | None:
             dst_mac=dst_mac,
         )
 
-    ip = packet.getlayer(IP) or packet.getlayer(IPv6)
+    # IPv4 takes precedence when both appear (tunnelling), matching the
+    # previous ``getlayer(IP) or getlayer(IPv6)`` ordering exactly.
+    ip = layers.get("ip") or layers.get("ipv6")
     if ip is None:
         return NetworkEvent(
             timestamp=timestamp,
@@ -193,7 +225,7 @@ def packet_to_event(packet: Packet) -> NetworkEvent | None:
         "dst_mac": dst_mac,
     }
 
-    tcp = packet.getlayer(TCP)
+    tcp = layers.get("tcp")
     if tcp is not None:
         return NetworkEvent(
             protocol=Protocol.TCP,
@@ -205,7 +237,7 @@ def packet_to_event(packet: Packet) -> NetworkEvent | None:
             **common,
         )
 
-    udp = packet.getlayer(UDP)
+    udp = layers.get("udp")
     if udp is not None:
         return NetworkEvent(
             protocol=Protocol.UDP,
@@ -215,7 +247,7 @@ def packet_to_event(packet: Packet) -> NetworkEvent | None:
             **common,
         )
 
-    icmp = packet.getlayer(ICMP)
+    icmp = layers.get("icmp")
     if icmp is not None:
         return NetworkEvent(
             protocol=Protocol.ICMP,
@@ -225,7 +257,7 @@ def packet_to_event(packet: Packet) -> NetworkEvent | None:
             **common,
         )
 
-    icmpv6 = _find_icmpv6(packet)
+    icmpv6 = layers.get("icmpv6")
     if icmpv6 is not None:
         return NetworkEvent(
             protocol=Protocol.ICMPV6,

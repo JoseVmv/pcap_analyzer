@@ -48,9 +48,10 @@ investigator/
 ├── errors.py         hierarquia de exceções tipadas
 ├── inventory.py      hosts, conversas, baseline de portas
 ├── stats.py          entropia, média, desvio, mediana, MAD, CV
-├── protocols/        dns.py, tcp.py, http.py, tls.py
+├── protocols/        dns.py, tcp.py, http.py, tls.py, arp.py, icmp.py
 ├── detectors/        base, scanning, beaconing, dns_anomaly, rare_destination,
-│                     unusual_ports, bursts, exfiltration, lateral
+│                     unusual_ports, bursts, exfiltration, lateral,
+│                     tls_anomaly, arp_spoofing, icmp_anomaly
 ├── findings.py       Finding, Evidence, Severity
 ├── correlation.py    fases, hipóteses, correlação temporal
 ├── threats.py        mapeamento para táticas (estilo ATT&CK)
@@ -135,6 +136,12 @@ O relatório embute strings controláveis por um atacante: nomes DNS, SNI de TLS
 | Transferência de saída | avaliação **em três níveis** (ver abaixo) | só chega a "indicador de exfiltração" com ≥2 evidências além de volume e direção |
 | HTTP periódico | CV dos intervalos entre requisições | exige mínimo de requisições; User-Agent legado entra só como sinal contextual fraco |
 | Lateral movement | sessões administrativas **estabelecidas** em N hosts | ignora SYNs sem resposta — isso é scan, não movimento lateral |
+| ARP contestado | um IP reivindicado por 2+ MACs | exige repetição por MAC; a confiança sobe com **sobreposição temporal**, não com a mera existência do conflito |
+| ICMP tunneling | tamanho médio do payload + variabilidade dos tamanhos | exige **≥2 sinais independentes**; um canal com um único tamanho convencional é ping e sai antes de qualquer avaliação |
+| ICMP sweep | echo para N endereços distintos | exige alta fração de alvos que nunca respondem |
+| TLS sem SNI | ClientHello sem `server_name` para destino externo | risco MEDIUM e confiança moderada: conexão direta a IP é rotina para agentes de monitoramento |
+| TLS SNI sem DNS | SNI que nenhuma resposta DNS da captura associou àquele IP | **só avalia se houve DNS observado** na captura; risco maior quando o DNS resolveu aquele IP para outro nome |
+| TLS fingerprint raro | JA3 usado por um único cliente | exige leque mínimo de destinos externos; raridade medida só dentro da captura |
 
 ### Transferência ≠ exfiltração: a avaliação em níveis
 
@@ -151,6 +158,20 @@ Por isso o detector é escalonado, e só promove ao nível seguinte quando há e
 Os indicadores corroborantes são: destino raro (só um host interno o contatou), ausência de resolução DNS (conexão direta a IP), POSTs/PUTs HTTP repetidos, volume de resposta desproporcionalmente baixo, e upload muito acima da mediana da própria captura.
 
 Mesmo o nível mais alto se chama *indicador*, nunca conclusão, e carrega sempre a limitação explícita de que o conteúdo do payload não pôde ser estabelecido.
+
+### ARP: o que distingue envenenamento de uma troca de endereço
+
+Dois MACs reivindicando o mesmo IP é quase um *fato*, não uma leitura estatística — ou aconteceu, ou não. O que continua incerto é a **causa**, e é aí que a confiança é gasta, não na observação.
+
+As explicações benignas são reais e comuns: o DHCP reatribuiu o endereço, trocaram a placa de rede, uma VM migrou, um par VRRP/CARP fez failover (que move um IP entre MACs por projeto), ou um roteador responde por outros endereços via proxy ARP.
+
+O que separa esses casos do envenenamento é **tempo**. Uma troca é sequencial: o MAC antigo silencia, o novo assume. Envenenamento é concorrente — os dois reivindicam o endereço na mesma janela, e o atacante repete anúncios gratuitos para o cache não expirar. Por isso a confiança é dirigida por sobreposição, repetição e divergência entre o MAC do cabeçalho Ethernet e o do payload ARP — nunca pela simples existência de dois bindings. Há um teste que constrói os dois cenários e exige que o concorrente pontue mais alto que o sequencial.
+
+### O fingerprint TLS não é uma lista de IOC
+
+O JA3 é calculado localmente a partir da ordenação de ciphers, extensões e curvas que o **cliente** escolhe — ou seja, identifica a *implementação* que fez a conexão, não o conteúdo dela. Ele nunca é comparado contra base externa: "raro" significa "poucos hosts desta captura produziram esse fingerprint", mantendo intacta a regra de que o baseline vem do tráfego em mãos.
+
+Os valores GREASE (RFC 8701) são removidos antes do hash. Eles existem justamente para variar entre conexões; se entrassem no cálculo, o mesmo cliente teria fingerprint diferente a cada handshake e a medida não serviria para nada. Há um teste que verifica exatamente isso.
 
 ### Por que o MAD e não só o desvio padrão
 
@@ -236,7 +257,7 @@ Cada parcela vira um `ScoreComponent` com rótulo, grupo, peso, multiplicador, p
 
 ## Estratégia de testes
 
-São 127 testes, e nenhum arquivo pcap binário é versionado. Todas as capturas são construídas na hora:
+São 212 testes, e nenhum arquivo pcap binário é versionado. Todas as capturas são construídas na hora:
 
 - **`tests/conftest.py`** monta capturas em memória com Scapy, cobrindo formatos pcap (little/big endian, microssegundos/nanossegundos), pcapng, gzip, arquivo vazio, arquivo de lixo, diretório e captura truncada.
 - **`tests/synth.py`** gera tráfego de ataque sintético: scan vertical e horizontal, beacon regular, beacon com jitter, beacon NTP legítimo (para testar supressão de falso positivo), tunelamento DNS, movimento lateral e upload em massa.
@@ -262,14 +283,23 @@ Para capturas muito grandes, algumas estruturas param de crescer enquanto os con
 | Nomes DNS únicos por cliente | 50.000 | marca `unique_qnames_overflow` |
 | Subdomínios por domínio | 20.000 | marca `subdomain_overflow` |
 | Registros HTTP / TLS | 100.000 / 50.000 | novos registros não são guardados; contadores seguem |
+| `MAX_TRACKED_HOSTS` | 200.000 | novos IPs não entram na tabela; `untracked_host_events` conta, e os contadores globais de porta seguem exatos |
+| `MAX_TRACKED_CONVERSATIONS` | 500.000 | novas arestas não entram; `untracked_conversation_events` conta |
+| `MAX_PEERS_PER_HOST` | 10.000 | `peer_count` vira um piso, sinalizado por `peers_overflow` |
+| `MAX_TRACKED_FLOWS` (TCP) | 400.000 | novos fluxos não entram; `untracked_flows` conta |
+| Bindings ARP / canais ICMP | 50.000 / 100.000 | marcam `tracked_overflow` e `channels_overflow` |
 
 O princípio é sempre o mesmo: **nunca perder informação em silêncio**. Quando um limite é atingido, existe um contador ou uma flag registrando isso.
+
+Os quatro últimos limites de tabela merecem uma nota: eles crescem com a **forma** do tráfego, não com o tamanho do arquivo — e o pior caso é exatamente o comportamento que a ferramenta existe para detectar. Uma varredura horizontal cria um host e uma conversa por endereço tocado; uma vertical cria um fluxo por porta sondada. Sem teto, a entrada adversarial seria também a que esgota a memória. Vale registrar a honestidade do custo: passado o teto de fluxos, a detecção que lê estado de fluxo (scan, movimento lateral) degrada — por isso o número de fluxos descartados é reportado em vez de escondido.
 
 ---
 
 ## Limitações técnicas
 
-- **Performance:** a dissecação do Scapy processa dezenas de milhares de pacotes por segundo. Para capturas muito grandes, o próximo passo natural é um fast-path com `RawPcapReader` + `struct` — a arquitetura já isola o parser justamente para permitir isso sem tocar nos detectores.
+- **Performance: cerca de 3 mil pacotes por segundo** no pipeline completo (medido em `samples/scenario_incident.pcap`, Python 3.14). O perfil é inequívoco: ~70% do tempo está em `scapy.read_packet`, ou seja, na dissecação. A busca de camadas no `parser.py` já foi reduzida a uma **passada única** pela cadeia (era um `getlayer` por camada de interesse, cada um percorrendo tudo de novo — 19 visitas de camada por pacote); isso deixou o lookup 24× mais rápido, mas mexe numa fatia pequena do total. O próximo passo real é um fast-path com `RawPcapReader` + `struct`, substituindo a dissecação: a arquitetura isola o parser justamente para permitir isso sem tocar em nenhum detector.
+
+  Detalhe que a passada única obrigou a acertar: o casamento de camadas é por **classe exata**, nunca `isinstance`. O Scapy modela os cabeçalhos citados dentro de um erro ICMP como subclasses dos originais (`TCPerror(TCP)`), e é assim que o `getlayer` se comporta. Um walk com `isinstance` casaria com o `TCPerror` dentro de um *destination unreachable* e reportaria um fluxo TCP fantasma onde havia só um aviso de inalcançabilidade. Há um teste para exatamente esse pacote.
 - **Sem reassembly de streams TCP:** HTTP e TLS são parseados apenas quando os cabeçalhos cabem no primeiro segmento. Mensagens fragmentadas são contadas (`multi_segment_skipped`, `fragmented_hellos`), nunca perdidas em silêncio.
 - **Interno vs externo é heurístico:** faixas RFC 1918, RFC 6598, loopback e link-local são tratadas como internas. Optou-se por faixas explícitas em vez de `ipaddress.is_private` porque versões recentes do Python estenderam esse atributo para todo o registro de propósitos especiais da IANA, incluindo faixas de documentação — o que não corresponde ao conceito de "host na rede monitorada".
 - **Agrupamento de domínio base** usa uma lista curta de sufixos multi-label (`com.br`, `co.uk`, etc.), não a Public Suffix List completa.

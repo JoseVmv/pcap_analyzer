@@ -7,6 +7,7 @@ failure cannot lose the others' findings.
 
 from __future__ import annotations
 
+from investigator.detectors.arp_spoofing import ArpSpoofingDetector
 from investigator.detectors.base import DetectionContext, Detector
 from investigator.detectors.beaconing import BeaconingDetector, ContactSeriesTracker
 from investigator.detectors.bursts import TrafficBurstDetector, TrafficRateTracker
@@ -16,9 +17,11 @@ from investigator.detectors.exfiltration import (
     DataTransferDetector,
 )
 from investigator.detectors.http_anomaly import HttpAnomalyDetector
+from investigator.detectors.icmp_anomaly import IcmpSweepDetector, IcmpTunnelDetector
 from investigator.detectors.lateral import HostDiscoveryDetector, LateralMovementDetector
 from investigator.detectors.rare_destination import RareDestinationDetector
 from investigator.detectors.scanning import PortScanDetector
+from investigator.detectors.tls_anomaly import TlsAnomalyDetector
 from investigator.detectors.unusual_ports import UnusualPortDetector
 from investigator.findings import Finding, sort_findings
 
@@ -28,11 +31,15 @@ DEFAULT_DETECTORS: list[Detector] = [
     BeaconingDetector(),
     HttpAnomalyDetector(),
     DnsAnomalyDetector(),
+    TlsAnomalyDetector(),
     RareDestinationDetector(),
     UnusualPortDetector(),
     TrafficBurstDetector(),
     DataTransferDetector(),
     LateralMovementDetector(),
+    ArpSpoofingDetector(),
+    IcmpTunnelDetector(),
+    IcmpSweepDetector(),
 ]
 
 
@@ -53,6 +60,7 @@ __all__ = [
     "run_detectors",
     "ContactSeriesTracker",
     "TrafficRateTracker",
+    "ArpSpoofingDetector",
     "BeaconingDetector",
     "TrafficBurstDetector",
     "DnsAnomalyDetector",
@@ -60,8 +68,11 @@ __all__ = [
     "DataTransferDetector",
     "HttpAnomalyDetector",
     "HostDiscoveryDetector",
+    "IcmpSweepDetector",
+    "IcmpTunnelDetector",
     "LateralMovementDetector",
     "RareDestinationDetector",
     "PortScanDetector",
+    "TlsAnomalyDetector",
     "UnusualPortDetector",
 ]
