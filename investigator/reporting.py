@@ -46,6 +46,9 @@ def build_report(result: "AnalysisResult") -> dict[str, object]:
         "investigation": result.investigation.as_dict()
         if result.investigation is not None
         else None,
+        "enrichment": result.enrichment.as_dict()
+        if result.enrichment is not None
+        else None,
     }
 
 

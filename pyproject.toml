@@ -30,7 +30,12 @@ dev = [
 pcap-investigator = "investigator.cli:main"
 
 [tool.setuptools]
-packages = ["investigator", "investigator.detectors", "investigator.protocols"]
+packages = [
+    "investigator",
+    "investigator.detectors",
+    "investigator.enrichment",
+    "investigator.protocols",
+]
 
 [tool.setuptools.package-data]
 investigator = ["templates/*.j2"]

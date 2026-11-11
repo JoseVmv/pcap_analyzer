@@ -29,6 +29,7 @@ from investigator.detectors import (
     run_detectors,
 )
 from investigator.engine import run_analysis
+from investigator.enrichment import Enrichment, LookupRunner, build_enrichment
 from investigator.findings import Finding
 from investigator.inventory import NetworkInventory
 from investigator.investigation import Investigation, build_investigation
@@ -57,6 +58,7 @@ class AnalysisResult:
     timeline: Timeline = field(default_factory=Timeline)
     risk: RiskScore | None = None
     investigation: Investigation | None = None
+    enrichment: Enrichment | None = None
 
 
 def analyze_capture(
@@ -64,6 +66,7 @@ def analyze_capture(
     config: Config | None = None,
     *,
     progress_every: int = 100_000,
+    lookups: LookupRunner | None = None,
 ) -> AnalysisResult:
     config = config or Config()
 
@@ -112,6 +115,18 @@ def analyze_capture(
         risk.confidence_level.label,
     )
 
+    # Last on purpose: everything above is settled before any third party is
+    # consulted, so a reputation answer cannot move a finding or the score.
+    enrichment = build_enrichment(
+        inventory, protocols, summary, findings, config, lookups=lookups
+    )
+    LOG.info(
+        "enrichment covers %d IP(s) and %d domain(s), %d lookup(s) sent",
+        len(enrichment.ips),
+        len(enrichment.domains),
+        sum(run.looked_up for run in enrichment.runs),
+    )
+
     return AnalysisResult(
         loader=loader,
         config=config,
@@ -125,4 +140,5 @@ def analyze_capture(
         timeline=timeline,
         risk=risk,
         investigation=investigation,
+        enrichment=enrichment,
     )

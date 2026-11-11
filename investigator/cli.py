@@ -109,6 +109,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="omit the timeline section from terminal output",
     )
     parser.add_argument(
+        "--enrich",
+        action="store_true",
+        help=(
+            "also look up public IPs and registrable domains in third-party "
+            "services (ASN, registration, reputation). Off by default, because "
+            "it sends those indicators over the internet; set VT_API_KEY and "
+            "ABUSEIPDB_API_KEY to add reputation data"
+        ),
+    )
+    parser.add_argument(
         "--no-html",
         action="store_true",
         help="skip generating investigation.html",
@@ -204,7 +214,8 @@ def run(argv: list[str] | None = None) -> int:
     # It also keeps `--help`/`--version` fast: scapy takes a while to load.
     from pathlib import Path
 
-    from investigator.config import load_config
+    from investigator.config import Config, load_config
+    from investigator.enrichment import build_lookup_runner, render_enrichment_text
     from investigator.investigation import (
         render_host_profiles_text,
         render_investigation_text,
@@ -234,8 +245,12 @@ def run(argv: list[str] | None = None) -> int:
         LOG.info(
             "loading %s (%s)", loader.path, loader.metadata.capture_format.value
         )
+        lookups = None
+        if args.enrich:
+            lookups = build_lookup_runner(config or Config())
+            print(lookups.describe(), file=sys.stderr)
         result = analyze_capture(
-            loader, config, progress_every=_PROGRESS_EVERY
+            loader, config, progress_every=_PROGRESS_EVERY, lookups=lookups
         )
 
         report = build_report(result)
@@ -279,6 +294,10 @@ def run(argv: list[str] | None = None) -> int:
     hypotheses_text = render_hypotheses_text(result.hypotheses)
     if hypotheses_text:
         print(hypotheses_text)
+    if result.enrichment is not None:
+        enrichment_text = render_enrichment_text(result.enrichment, limit=args.top)
+        if enrichment_text:
+            print(enrichment_text)
     if not args.no_timeline:
         timeline_text = render_timeline_text(
             result.timeline, limit=args.timeline_entries

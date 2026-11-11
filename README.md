@@ -2,7 +2,7 @@
 
 **Investigue capturas de rede automaticamente.** Você dá um arquivo `.pcap`, ele te devolve o que provavelmente aconteceu — com as evidências que sustentam cada conclusão.
 
-Nada de IA, nada de listas de bloqueio, nada de serviços externos. A investigação é feita com protocolos, estatística e correlação de eventos, tudo rodando localmente na sua máquina.
+Nada de IA e nada de listas de bloqueio. A investigação é feita com protocolos, estatística e correlação de eventos, tudo rodando localmente na sua máquina. Nenhum dado sai dela, a menos que você peça: a consulta a serviços externos só acontece com `--enrich`.
 
 ---
 
@@ -58,7 +58,7 @@ Conclusion:
 
 Três detalhes importam aqui. **Risco e confiança são separados** — um deles diz o quão grave seria, o outro o quão certa é a evidência. **Findings do mesmo comportamento não inflam o score**: várias comunicações periódicas do mesmo host viram um grupo só, com retornos decrescentes visíveis na conta. E **toda conclusão carrega suas limitações** — nada de "malicioso: sim".
 
-Além do terminal, você recebe um relatório HTML navegável com hosts, comunicações, protocolos, timeline e todas as evidências.
+Além do terminal, você recebe um relatório HTML navegável com hosts, comunicações, protocolos, timeline, o contexto de cada IP e site acessado e todas as evidências.
 
 ---
 
@@ -126,7 +126,7 @@ E o mais importante: ele **agrupa e correlaciona** esses achados. Dezenas de ale
 
 **Ele explica tudo.** Cada alerta lista as evidências concretas — quantas conexões, qual o intervalo médio, qual o desvio padrão, quantos hosts contataram aquele destino. Você pode discordar da conclusão, mas vai entender como ela foi tirada.
 
-**Ele não depende de listas de IOC.** Não existe base de "IPs maliciosos conhecidos". A referência é o **próprio tráfego da captura**: "raro" significa raro comparado ao resto do que foi observado ali. Isso permite encontrar coisas que nenhuma lista conhece ainda.
+**Ele não depende de listas de IOC.** Não existe base de "IPs maliciosos conhecidos". A referência é o **próprio tráfego da captura**: "raro" significa raro comparado ao resto do que foi observado ali. Isso permite encontrar coisas que nenhuma lista conhece ainda. Reputação externa existe como [contexto opcional](#contexto-de-ips-e-sites-ioc-enrichment), mas nunca altera um finding nem o score.
 
 **Ele leva contexto em conta.** Servidores NTP, DNS e CDNs também fazem conexões periódicas. A ferramenta reconhece esses casos e rebaixa a confiança — um beacon para a porta 123 não é tratado como um beacon para a porta 4444.
 
@@ -135,6 +135,48 @@ E o mais importante: ele **agrupa e correlaciona** esses achados. Dezenas de ale
 **Ele nunca afirma além do que os dados permitem.** A linguagem é sempre probabilística, e cada achado declara suas próprias limitações. Volume grande não é chamado de exfiltração; periodicidade não é chamada de C2; entropia de DNS não é chamada de tunelamento. A ferramenta detecta de forma agressiva e conclui de forma conservadora.
 
 **Ele aguenta capturas grandes.** O arquivo é lido uma única vez, pacote a pacote, sem carregar tudo na memória.
+
+---
+
+## Contexto de IPs e sites (IOC enrichment)
+
+Os findings dizem o que o tráfego fez; esta parte diz **com quem ele falou**. Todo relatório traz uma seção com cada IP externo e cada domínio da captura, começando pelos que estão ligados a um finding. Os mesmos dados aparecem ao lado dos findings, dos hosts e das comunicações.
+
+**Sem nenhuma opção, nada sai da sua máquina.** O contexto vem de duas fontes locais:
+
+- **A própria captura:** quais nomes o DNS associou àquele IP, qual SNI e `Host` foram pedidos, quais URLs foram acessadas, quem acessou, em que portas, com que volume e quando.
+- **Uma tabela embutida de operadores:** Cloudflare, Fastly, Google, DNS públicos, CDNs e também serviços legítimos mas muito usados em ataques, como DNS dinâmico, túneis e sites de paste. Ela diz quem opera a infraestrutura, nunca se o tráfego é legítimo.
+
+Quando a captura não pode mostrar um nome (QUIC, DNS criptografado, captura iniciada depois do handshake), o relatório diz isso, para que "sem nome" não pareça suspeito.
+
+### Consultas online com `--enrich`
+
+```bash
+python -m investigator captura.pcap --enrich
+```
+
+| Serviço | Chave | O que acrescenta |
+|---|---|---|
+| RIPEstat | não precisa | ASN, dono do ASN, prefixo e país do IP |
+| RDAP (`rdap.org`) | não precisa | data de registro do domínio, expiração e registrador |
+| Shodan InternetDB | não precisa | portas expostas, tags e CVEs conhecidas do IP |
+| VirusTotal | `VT_API_KEY` | quantos engines sinalizaram o IP ou domínio, pontuação e categorias |
+| AbuseIPDB | `ABUSEIPDB_API_KEY` | score de abuso, denúncias, ISP, tipo de uso e saída Tor |
+
+As chaves são lidas só do ambiente, nunca do arquivo de configuração, porque arquivos de configuração acabam sendo compartilhados:
+
+```powershell
+$env:VT_API_KEY = "sua-chave"          # Linux/macOS: export VT_API_KEY=sua-chave
+$env:ABUSEIPDB_API_KEY = "sua-chave"
+```
+
+**O que é enviado:** apenas IPs públicos e domínios base (`evil.io`). **O que nunca é enviado:** URLs, nomes completos (`abc123.t.evil.io`, porque num túnel DNS os próprios rótulos podem ser os dados exfiltrados), endereços internos, nomes como `.local`, nomes que só resolvem para IPs internos e metadados da captura. Para proteger um domínio interno sob um TLD público, use `enrich_exclude_domains`. Nenhuma consulta toca a infraestrutura do próprio indicador; por isso não há DNS reverso, que avisaria o dono do endereço.
+
+**O que isso não muda:** o risco e os findings. O mesmo arquivo sempre produz o mesmo score, com ou sem `--enrich`. Uma resposta de terceiros reflete o momento da consulta, não o da captura, e "sem denúncias" não é prova de segurança; por isso o relatório diz `NO REPORTS`, nunca "limpo".
+
+**Planos gratuitos são pequenos:** o VirusTotal permite 4 consultas por minuto. Os indicadores ligados a findings vão primeiro, o que não couber no limite de tempo (`enrich_deadline_seconds`, 180 s) é listado como não consultado, e as respostas ficam em cache por 7 dias em `~/.cache/pcap-investigator/`. Rodar de novo continua de onde parou, sem reenviar o que já foi consultado.
+
+> Confira os termos de cada serviço para o seu uso. O InternetDB é gratuito apenas para uso não comercial, e o plano gratuito do VirusTotal tem restrições de uso comercial. Para escolher os serviços, use `enrich_providers = ["ripestat", "rdap"]` no arquivo de configuração.
 
 ---
 
@@ -148,6 +190,7 @@ python -m investigator captura.pcap [opções]
 |---|---|
 | `--output-dir PASTA` | Onde salvar os relatórios (padrão: `reports/`) |
 | `--config ARQUIVO` | Ajustar limiares e pesos sem editar código (`.toml` ou `.json`) |
+| `--enrich` | Consultar serviços externos sobre IPs públicos e domínios ([detalhes](#contexto-de-ips-e-sites-ioc-enrichment)) |
 | `--fail-on NÍVEL` | Sair com código 20 quando o risco atinge `low`/`medium`/`high`/`critical` — para usar em automação |
 | `--max-packets N` | Dar uma espiada rápida numa captura enorme |
 | `--top N` | Mostrar mais (ou menos) itens nas listas do terminal |
@@ -193,7 +236,7 @@ pip install -e ".[dev]"
 python -m pytest
 ```
 
-São 212 testes. Todos usam capturas sintéticas geradas na hora — nenhum arquivo binário de origem duvidosa no repositório. Isso inclui testes que verificam que a ferramenta **não** gera alarme falso em tráfego legítimo: um ping comum não pode virar túnel ICMP, uma troca de endereço por DHCP não pode virar ARP spoofing, e uma sessão TLS cujo SNI o DNS resolveu não pode virar alerta.
+São 473 testes. Todos usam capturas sintéticas geradas na hora — nenhum arquivo binário de origem duvidosa no repositório. Isso inclui testes que verificam que a ferramenta **não** gera alarme falso em tráfego legítimo: um ping comum não pode virar túnel ICMP, uma troca de endereço por DHCP não pode virar ARP spoofing, e uma sessão TLS cujo SNI o DNS resolveu não pode virar alerta.
 
 ---
 
@@ -203,6 +246,7 @@ São 212 testes. Todos usam capturas sintéticas geradas na hora — nenhum arqu
 - **Não remonta streams TCP.** Cabeçalhos HTTP/TLS partidos entre vários pacotes são contabilizados como "não processados", nunca ignorados em silêncio.
 - **A separação interno/externo é uma suposição** baseada em faixas de IP privadas. Redes com endereçamento público interno seriam classificadas de outra forma.
 - **Velocidade medida: cerca de 3 mil pacotes por segundo** no pipeline completo (Python 3.14, captura de exemplo). Cerca de 70% desse tempo é a dissecação do Scapy. Serve para capturas de triagem — algo em torno de 1 milhão de pacotes por 5 minutos — mas não é um analisador de linha. O caminho para melhorar isso está descrito na [ARCHITECTURE](ARCHITECTURE.md#limitações-técnicas).
+- **O enriquecimento é contexto, não veredito.** Dados de terceiros podem estar errados ou desatualizados, e a tabela embutida de operadores só cobre quem publica suas faixas de IP (AWS e Azure ficam para as consultas online).
 - **É uma ferramenta de triagem, não um veredito final.** Ela aponta onde olhar; a confirmação vem do host, dos logs e do contexto que só você tem.
 
 ---
@@ -217,6 +261,7 @@ investigator/
 ├── inventory.py      quem está na rede, quem fala com quem
 ├── protocols/        análise de DNS, TCP, HTTP, TLS, ARP e ICMP
 ├── detectors/        os detectores de comportamento suspeito
+├── enrichment/       contexto de IPs e sites: da captura e, com --enrich, de terceiros
 ├── correlation.py    conecta achados em hipóteses
 ├── timeline.py       reconstrói a ordem dos eventos
 ├── scoring.py        calcula o risco de forma explicável

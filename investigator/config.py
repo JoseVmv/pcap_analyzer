@@ -199,6 +199,31 @@ class Config:
     tls_legacy_version_confidence: float = 0.60
     tls_rare_fingerprint_confidence: float = 0.40
 
+    # -- IOC enrichment ---------------------------------------------------
+    #: Indicators kept per kind (IPs, domains).  Ranked first, so a limit drops
+    #: the least interesting ones, and the number dropped is reported.
+    enrich_max_indicators: int = 500
+    #: Entries per listing inside one indicator (names, peers, URLs...).
+    enrich_max_listed: int = 10
+    #: A domain registered this close before the capture gets a note.
+    enrich_new_domain_days: int = 30
+    #: Services used by --enrich.  API keys are read from the environment,
+    #: never from here: config files get shared.
+    enrich_providers: tuple[str, ...] = (
+        "ripestat", "rdap", "internetdb", "virustotal", "abuseipdb",
+    )
+    #: Domains never sent to a third party, matched by suffix against every
+    #: name observed under them.  For internal names under a public TLD.
+    enrich_exclude_domains: tuple[str, ...] = ()
+    enrich_max_lookups_per_provider: int = 100
+    enrich_deadline_seconds: float = 180.0
+    enrich_timeout_seconds: float = 10.0
+    enrich_cache_ttl_hours: float = 168.0  # 0 disables the cache
+    enrich_cache_dir: str = ""             # empty: ~/.cache/pcap-investigator
+    #: Reputation only labels the report; none of these affect the risk score.
+    enrich_vt_flag_engines: int = 3       # engines reporting malicious
+    enrich_abuse_flag_score: int = 50     # AbuseIPDB confidence score (0-100)
+
     # -- risk scoring (V7) ------------------------------------------------
     weights: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_WEIGHTS)
@@ -284,6 +309,12 @@ def _coerce(key: str, value: object, declared: object, source: Path | str) -> ob
                 source, f"{key!r} must be a number, got {type(value).__name__}"
             )
         return float(value)
+    if declared.startswith("str"):
+        if not isinstance(value, str):
+            raise ConfigError(
+                source, f"{key!r} must be a string, got {type(value).__name__}"
+            )
+        return value
     return value
 
 

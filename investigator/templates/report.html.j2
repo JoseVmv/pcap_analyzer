@@ -95,6 +95,8 @@
           padding: .7rem 1rem; border-radius: 0 6px 6px 0; font-size: .88rem;
           color: var(--muted); }
   footer { text-align: center; color: var(--muted); font-size: .8rem; margin-top: 2rem; }
+  a { color: var(--accent); }
+  .ctx { font-size: .84rem; margin: .1rem 0; }
 </style>
 </head>
 <body>
@@ -109,6 +111,31 @@
 </header>
 
 <main>
+{% set labels = enrichment.labels if enrichment else {} %}
+{% macro listing(values) -%}
+  {%- for v in values.sample %}<code>{{ v }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+  {%- if values.total > values.sample|length %} <span class="muted">+{{ values.total - values.sample|length }}</span>{% endif %}
+{%- endmacro %}
+{% macro reputation_badge(r) -%}
+  {%- if r.signal == 'flagged' %}<span class="badge HIGH">FLAGGED</span>
+  {%- elif r.signal == 'reported' %}<span class="badge MEDIUM">REPORTED</span>
+  {%- elif r.signal == 'no_reports' %}<span class="badge LOW">NO REPORTS</span>
+  {%- else %}<span class="muted">not checked</span>{% endif %}
+{%- endmacro %}
+{% macro indicator_context(i) -%}
+  {%- if i.service %}<div class="ctx"><strong>{{ i.service.name }}</strong> <span class="muted">({{ i.service.category }}{% if i.service.commonly_abused %}, commonly abused{% endif %})</span></div>{% endif %}
+  {%- for r in i.lookups %}<div class="ctx"><span class="muted">{{ r.provider }}:</span> {{ r.summary or r.detail or r.status }}{% if r.cached %} <span class="muted">(cached)</span>{% endif %}</div>{% endfor %}
+  {%- for n in i.notes %}<div class="ctx muted">{{ n }}</div>{% endfor %}
+  {%- if i.lookup_block %}<div class="ctx muted">not sent to third parties: {{ i.lookup_block }}</div>{% endif %}
+{%- endmacro %}
+{% macro related_findings(i) -%}
+  {%- for id in i.finding_ids[:6] %}<a class="mono" href="#{{ id }}">{{ id }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+  {%- if i.finding_ids|length > 6 %} <span class="muted">+{{ i.finding_ids|length - 6 }}</span>{% endif %}
+  {%- if not i.finding_ids %}<span class="muted">-</span>{% endif %}
+{%- endmacro %}
+{% macro pivot_links(i) -%}
+  {%- for p in i.pivots %}<a href="{{ p.url }}" target="_blank" rel="noopener noreferrer">{{ p.name }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}
+{%- endmacro %}
 
 <!-- ============================ OVERALL RISK -->
 <section>
@@ -247,7 +274,7 @@
     <p class="muted">No behaviour crossed the configured detection thresholds.</p>
   {% endif %}
   {% for f in findings %}
-  <div class="finding {{ f.severity }}">
+  <div class="finding {{ f.severity }}" id="{{ f.id }}">
     <div class="head">
       <span class="badge {{ f.severity }}">RISK {{ f.risk }}</span>
       <span class="badge INFO">CONFIDENCE {{ f.confidence_level }}</span>
@@ -259,6 +286,9 @@
         {%- endif %}</span>
     </div>
     <div class="why">{{ f.explanation }}</div>
+    {% if labels.get(f.destination) %}
+    <div class="why"><strong>Destination context:</strong> {{ labels.get(f.destination) }}</div>
+    {% endif %}
     <ul class="evidence">
       {% for e in f.evidence %}<li>{{ e.summary }}</li>{% endfor %}
     </ul>
@@ -304,6 +334,132 @@
 </section>
 {% endif %}
 
+<!-- ============================ IOC ENRICHMENT -->
+{% if enrichment and (enrichment.ips or enrichment.domains) %}
+<section>
+  <h2>IOC enrichment</h2>
+  <p class="sub">Every external address and domain in this capture, with what is
+  known about it, findings first. Being listed here is not an accusation: most of
+  what any host talks to is ordinary infrastructure.</p>
+
+  <div class="note">
+    {% if enrichment.contacted_services %}
+    <strong>Online lookups were enabled.</strong> {{ enrichment.lookups_sent }}
+    lookup(s) went to {{ enrichment.contacted_services|join(", ") }}, carrying only
+    public IP addresses and registrable domain names: never URLs, full hostnames,
+    internal addresses or capture metadata.
+    {% elif enrichment.mode == 'online' %}
+    <strong>Online lookups were enabled, but nothing was sent this run.</strong>
+    Third-party data below comes from the local cache, if any.
+    {% else %}
+    <strong>Offline.</strong> Nothing left this machine. Run with
+    <code>--enrich</code> to add ASN, registration and reputation data; the links
+    in the last column send a value to a third party only when clicked.
+    {% endif %}
+    <br>Service names come from a built-in table and identify an operator, not
+    legitimacy. Third-party answers reflect the moment of the lookup rather than of
+    the capture, and "no reports" is not evidence of safety. None of this affects
+    the risk score.
+    {% if enrichment.flagged_count or enrichment.reported_count %}
+    <br><strong>{{ enrichment.flagged_count }} flagged and
+    {{ enrichment.reported_count }} reported</strong> by the reputation sources consulted.
+    {% endif %}
+  </div>
+
+  {% if enrichment.notes %}
+  <h3>What this capture could not show</h3>
+  <ul class="evidence">
+    {% for n in enrichment.notes %}<li>{{ n }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if enrichment.providers or enrichment.unavailable_providers %}
+  <h3>Services consulted</h3>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Service</th><th>Lookups sent</th><th>From cache</th><th>No record</th><th>Errors</th><th>Not looked up</th><th>Stopped because</th></tr></thead>
+    <tbody>
+    {% for p in enrichment.providers %}
+      <tr>
+        <td>{{ p.name }}</td>
+        <td class="mono">{{ p.looked_up }}</td>
+        <td class="mono">{{ p.cached }}</td>
+        <td class="mono">{{ p.not_found }}</td>
+        <td class="mono">{{ p.errors }}</td>
+        <td class="mono">{{ p.not_queried }}</td>
+        <td class="muted">{{ p.stopped or "-" }}</td>
+      </tr>
+    {% endfor %}
+    {% for name, reason in enrichment.unavailable_providers.items() %}
+      <tr><td>{{ name }}</td><td colspan="6" class="muted">not used: {{ reason }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+
+  {% if enrichment.ips %}
+  <h3>External addresses ({{ enrichment.ip_count + enrichment.ips_omitted }})</h3>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Address</th><th>Seen in this capture</th><th>Traffic</th><th>Context</th><th>Reputation</th><th>Related findings</th><th>Look up</th></tr></thead>
+    <tbody>
+    {% for i in enrichment.ips %}
+      <tr>
+        <td><code>{{ i.value }}</code>{% if i.address_class %}<br><span class="muted">{{ i.address_class }}</span>{% endif %}</td>
+        <td>
+          {% if i.names.total %}<div class="ctx"><span class="muted">DNS:</span> {{ listing(i.names) }}</div>{% endif %}
+          {% if i.sni.total %}<div class="ctx"><span class="muted">SNI:</span> {{ listing(i.sni) }}</div>{% endif %}
+          {% if i.http_hosts.total %}<div class="ctx"><span class="muted">HTTP Host:</span> {{ listing(i.http_hosts) }}</div>{% endif %}
+          {% if i.http_servers.total %}<div class="ctx"><span class="muted">Server:</span> {{ listing(i.http_servers) }}</div>{% endif %}
+          {% if i.internal_peers.total %}<div class="ctx"><span class="muted">Contacted by:</span> {{ listing(i.internal_peers) }}</div>{% endif %}
+          {% if i.ports %}<div class="ctx"><span class="muted">Ports:</span> <span class="mono">{{ i.ports|join(", ") }}</span> <span class="muted">({{ i.protocols|join(", ") }})</span></div>{% endif %}
+        </td>
+        <td class="mono">{{ i.bytes_to|filesize }} to<br>{{ i.bytes_from|filesize }} from<br><span class="muted">{{ i.first_seen|clock }}-{{ i.last_seen|clock }}</span></td>
+        <td>{{ indicator_context(i) }}</td>
+        <td>{{ reputation_badge(i.reputation) }}</td>
+        <td>{{ related_findings(i) }}</td>
+        <td>{{ pivot_links(i) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if enrichment.ips_omitted %}<p class="sub">{{ enrichment.ips_omitted }} more address(es) beyond the <code>enrich_max_indicators</code> limit are not listed.</p>{% endif %}
+  {% endif %}
+
+  {% if enrichment.domains %}
+  <h3>Domains ({{ enrichment.domain_count + enrichment.domains_omitted }})</h3>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Domain</th><th>Seen in this capture</th><th>Activity</th><th>Context</th><th>Reputation</th><th>Related findings</th><th>Look up</th></tr></thead>
+    <tbody>
+    {% for d in enrichment.domains %}
+      <tr>
+        <td><code>{{ d.value }}</code><br><span class="muted">via {{ d.seen_via|join(", ") or "-" }}</span></td>
+        <td>
+          {% if d.names.total %}<div class="ctx"><span class="muted">Names:</span> {{ listing(d.names) }}</div>{% endif %}
+          {% if d.resolved_ips.total %}<div class="ctx"><span class="muted">Resolved to:</span> {{ listing(d.resolved_ips) }}</div>{% endif %}
+          {% if d.contacted_ips.total %}<div class="ctx"><span class="muted">Connected to:</span> {{ listing(d.contacted_ips) }}</div>{% endif %}
+          {% if d.clients.total %}<div class="ctx"><span class="muted">Clients:</span> {{ listing(d.clients) }}</div>{% endif %}
+          {% for u in d.urls %}<div class="ctx mono">{{ u.url }}{% if u.count > 1 %} <span class="muted">&times;{{ u.count }}</span>{% endif %}</div>{% endfor %}
+          {% if d.url_total > d.urls|length %}<div class="ctx muted">+{{ d.url_total - d.urls|length }} more URL(s)</div>{% endif %}
+        </td>
+        <td class="mono">{{ d.dns_queries }} DNS<br>{{ d.tls_sessions }} TLS<br>{{ d.http_requests }} HTTP</td>
+        <td>{{ indicator_context(d) }}</td>
+        <td>{{ reputation_badge(d.reputation) }}</td>
+        <td>{{ related_findings(d) }}</td>
+        <td>{{ pivot_links(d) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if enrichment.domains_omitted %}<p class="sub">{{ enrichment.domains_omitted }} more domain(s) beyond the <code>enrich_max_indicators</code> limit are not listed.</p>{% endif %}
+  {% endif %}
+</section>
+{% endif %}
+
 <!-- ============================ TIMELINE -->
 <section>
   <h2>Timeline ({{ timeline.entry_count }} entries)</h2>
@@ -333,12 +489,13 @@
   </div>
   <div class="scroll">
   <table>
-    <thead><tr><th>Host</th><th>Kind</th><th>Sent</th><th>Received</th><th>Peers</th><th>First seen</th><th>Last seen</th></tr></thead>
+    <thead><tr><th>Host</th><th>Kind</th><th>Context</th><th>Sent</th><th>Received</th><th>Peers</th><th>First seen</th><th>Last seen</th></tr></thead>
     <tbody>
     {% for h in inventory.hosts[:40] %}
       <tr {% if h.ip == investigation.primary_suspect %}style="background:#26202a"{% endif %}>
         <td><code>{{ h.ip }}</code>{% if h.ip == investigation.primary_suspect %} <span class="badge HIGH">SUSPECT</span>{% endif %}</td>
         <td>{{ h.kind }}</td>
+        <td class="muted">{{ labels.get(h.ip, "") }}</td>
         <td class="mono">{{ h.bytes_sent|filesize }}</td>
         <td class="mono">{{ h.bytes_received|filesize }}</td>
         <td class="mono">{{ h.peer_count }}</td>
@@ -356,12 +513,13 @@
   <h2>Top communications</h2>
   <div class="scroll">
   <table>
-    <thead><tr><th>Source</th><th>Destination</th><th>Protocols</th><th>Ports</th><th>Packets</th><th>Bytes</th><th>Duration</th></tr></thead>
+    <thead><tr><th>Source</th><th>Destination</th><th>Context</th><th>Protocols</th><th>Ports</th><th>Packets</th><th>Bytes</th><th>Duration</th></tr></thead>
     <tbody>
     {% for c in inventory.conversations[:30] %}
       <tr>
         <td><code>{{ c.src_ip }}</code></td>
         <td><code>{{ c.dst_ip }}</code></td>
+        <td class="muted">{{ labels.get(c.dst_ip) or labels.get(c.src_ip, "") }}</td>
         <td>{{ c.protocols.keys()|list|join(", ") }}</td>
         <td class="mono">{{ c.dst_ports.keys()|list|first_n(4) }}</td>
         <td class="mono">{{ c.packets }}</td>
@@ -520,7 +678,12 @@
 {% endif %}
 
 <footer>
-  pcap-investigator v{{ tool.version }} &middot; offline analysis, no external services
+  pcap-investigator v{{ tool.version }} &middot;
+  {% if enrichment and enrichment.contacted_services %}
+  capture analysed offline; {{ enrichment.lookups_sent }} enrichment lookup(s) sent to {{ enrichment.contacted_services|join(", ") }}
+  {% else %}
+  offline analysis, no external services
+  {% endif %}
   &middot; {{ capture.packets }} packets analysed
   {%- if capture.malformed_packets %} ({{ capture.malformed_packets }} malformed skipped){% endif %}
   {%- if capture.truncated %} &middot; capture was truncated{% endif %}

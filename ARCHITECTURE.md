@@ -10,6 +10,7 @@ Este documento explica **como** a ferramenta funciona por dentro e **por que** c
 - [Como cada detector decide](#como-cada-detector-decide)
 - [Correlação e confiança](#correlação-e-confiança)
 - [Risk score](#risk-score)
+- [IOC enrichment](#ioc-enrichment)
 - [Estratégia de testes](#estratégia-de-testes)
 - [Limites de memória](#limites-de-memória)
 - [Limitações técnicas](#limitações-técnicas)
@@ -29,6 +30,9 @@ PcapLoader ──stream de NetworkEvent──> coletores (inventory, protocolos,
                                             │
                                             v
                                   timeline + scoring + investigação
+                                            │
+                                            v
+                                  enriquecimento de IOCs ◄──(só com --enrich)── serviços externos
                                             │
                                             v
                           investigation.json / investigation.html / timeline.json
@@ -58,6 +62,8 @@ investigator/
 ├── timeline.py       reconstrução cronológica
 ├── scoring.py        risk score explicável
 ├── investigation.py  sumário executivo, ranking de suspeitos
+├── enrichment/       indicators (contexto da captura), knowledge (operadores),
+│                     providers (serviços externos), lookups (limites e cache)
 ├── reporting.py      geração de JSON e HTML
 ├── config.py         TODOS os limiares e pesos
 └── templates/        report.html.j2
@@ -95,7 +101,7 @@ Nada é permanentemente ignorado. O que existe são **penalidades de confiança*
 
 ### 6. Baseline vem da própria captura
 
-"Raro", "incomum" e "muito acima do normal" são medidos contra o resto do tráfego observado no mesmo arquivo, nunca contra uma lista externa de IOC. É isso que permite encontrar comportamento que nenhuma base conhece.
+"Raro", "incomum" e "muito acima do normal" são medidos contra o resto do tráfego observado no mesmo arquivo, nunca contra uma lista externa de IOC. É isso que permite encontrar comportamento que nenhuma base conhece. O [enriquecimento de IOCs](#ioc-enrichment) não muda essa regra: ele roda depois do score e não alimenta nada que venha antes dele.
 
 ### 7. Erros tipados, pacote quebrado não aborta a análise
 
@@ -118,6 +124,8 @@ O relatório embute strings controláveis por um atacante: nomes DNS, SNI de TLS
 **PyShark foi descartado** por ser um wrapper do binário tshark, o que criaria dependência do Wireshark instalado e violaria a premissa de análise autocontida.
 
 **pandas e numpy foram deliberadamente evitados.** As estatísticas usadas (entropia de Shannon, média, desvio padrão, mediana, desvio absoluto mediano, coeficiente de variação) cabem em cerca de 60 linhas em `stats.py`. Não justificaria carregar dezenas de megabytes de dependência para isso.
+
+**`requests` também não entrou.** As consultas do `--enrich` são poucos GETs de JSON, e `urllib` dá conta. Além disso, o controle fino de redirecionamentos, que é uma questão de segurança aqui, é mais direto nele.
 
 ---
 
@@ -255,9 +263,82 @@ Cada parcela vira um `ScoreComponent` com rótulo, grupo, peso, multiplicador, p
 
 ---
 
+## IOC enrichment
+
+Os findings dizem o que o tráfego fez; o enriquecimento diz com quem ele falou. São dois níveis:
+
+| Nível | Quando roda | Fonte |
+|---|---|---|
+| Offline | sempre | agregados que os coletores já montaram, mais uma tabela embutida de operadores |
+| Online | só com `--enrich` | RIPEstat, RDAP, Shodan InternetDB, VirusTotal, AbuseIPDB |
+
+O nível offline costuma trazer o contexto mais valioso, porque é de primeira mão. Um registro diz quem é o dono de um endereço; só a captura diz qual nome este cliente resolveu para ele, qual SNI pediu e qual URL acessou.
+
+### Por que não alimenta o score
+
+É a decisão central. O enriquecimento roda **depois** de findings, correlação e score, e `analyze_capture` não passa nada dele de volta. Há um teste que compara uma execução sem consultas com outra em que um provedor marca tudo como malicioso, e exige findings, score e conclusão idênticos.
+
+Reputação externa é contexto, não evidência: muda com o tempo, reflete o momento da consulta e não o da captura, e um score que oscilasse com ela não poderia ser reproduzido nem explicado. Uma lista de bloqueio dizer que um IP é ruim também não é o tipo de afirmação que esta ferramenta consegue sustentar com pacotes.
+
+Pelo mesmo motivo o vocabulário é contido. Os estados são `flagged`, `reported`, `no_reports` e `not_checked`. Não existe "limpo", porque ninguém ter reclamado não é evidência de segurança. E `not_checked` é separado de `no_reports`, porque ninguém ter sido consultado é bem diferente de ninguém ter reclamado.
+
+### O que pode sair da máquina
+
+Offline é o padrão pela forma como o código é ligado, não por uma flag verificada lá dentro: sem um `LookupRunner` passado a `analyze_capture`, nenhum código de rede executa. Um teste faz qualquer tentativa de abrir socket falhar e roda a análise e a CLI completas.
+
+Com `--enrich`, só dois tipos de valor são elegíveis, e a decisão fica em `indicators.py`:
+
+- **IP com `is_global`.** Endereços internos e faixas especiais nunca saem.
+- **Domínio base com formato válido**, fora de TLDs que não existem no DNS público (`.local`, `.internal`, `.arpa`...), fora de `enrich_exclude_domains` e que não resolva só para IPs internos.
+
+Três escolhas merecem nota:
+
+**Só o domínio base, nunca o nome completo.** Num túnel DNS, os rótulos do subdomínio podem *ser* os dados exfiltrados. Consultar o nome completo entregaria esses dados a um terceiro, e o analista causaria o vazamento que está investigando.
+
+**A validação do nome é também uma defesa contra injeção.** SNI e `Host` são controlados por quem gerou o tráfego. Sem validação, um SNI como `x.com/../../users/me` poderia alterar o caminho de uma chamada de API feita com a chave do analista. Só nomes com letras, dígitos e hífens passam; o `quote` na hora de montar a URL é a segunda barreira.
+
+**Nada toca a infraestrutura do próprio indicador.** Todo serviço aqui é um registro ou uma fonte de inteligência. DNS reverso ficou de fora de propósito: a consulta PTR chega ao servidor de nomes de quem controla o endereço e pode avisar um atacante de que o host dele está sendo observado.
+
+### Respostas são entrada hostil
+
+Registros RDAP e de reputação são escritos por quem registrou o recurso, atacante incluído. Portanto:
+
+- todo texto passa por `clean_text`, que remove caracteres de controle e de formatação (sequências ANSI, overrides de direção do Unicode) e limita o tamanho;
+- todo campo tem o tipo verificado (`true` não vira "um engine marcou");
+- uma resposta malformada vira erro registrado naquele indicador, nunca uma queda da análise;
+- o corpo tem tamanho máximo, e o HTML continua protegido pelo autoescape.
+
+As chaves de API viajam só em cabeçalho, vêm só do ambiente e nunca aparecem em relatório, cache ou mensagem de erro. Requisições com chave **não seguem redirecionamentos**, porque o `urllib` reencaminharia o cabeçalho para o host indicado no redirect. O RDAP segue, porque o `rdap.org` é um bootstrap que responde com redirect para o registro certo; ele não envia credenciais e só aceita destinos HTTPS.
+
+### Limites de uso
+
+Planos gratuitos são pequenos e uma captura pode ter centenas de indicadores. Então a pergunta deixa de ser "como consultar tudo" e vira "o que consultar primeiro, e como dizer o que ficou de fora":
+
+- indicadores ligados a findings vão primeiro; IPs e domínios são intercalados para um orçamento pequeno não ir todo para um tipo só;
+- cada provedor roda na própria thread e no próprio ritmo, de modo que os 15 s entre consultas do VirusTotal não atrasam os outros, e nenhum serviço recebe chamadas paralelas;
+- `429`, `401` e `403` param aquele provedor na hora, e três falhas seguidas também, para uma máquina sem rede não gastar um timeout por indicador;
+- o que não coube fica registrado **por indicador** como `not_queried`, com o motivo;
+- respostas boas (inclusive "sem registro") ficam em cache; erros não, para serem tentados de novo.
+
+O cache mora em `~/.cache/pcap-investigator/`, e não na pasta do relatório, porque acumula indicadores de investigações diferentes, e a pasta do relatório é justamente o que se compacta e envia para alguém.
+
+### A tabela embutida de operadores
+
+Uma dica nomeia um operador, nunca um veredito. Não é whitelist e não reduz a confiança de nenhum finding; atacantes alugam as mesmas CDNs que todo mundo. O campo `commonly_abused` marca serviços legítimos que são especialmente convenientes para um atacante (DNS dinâmico, túneis, sites de paste, serviços de "qual é meu IP").
+
+A tabela é curta de propósito, porque cada entrada pode envelhecer. As faixas de IP vêm das listas publicadas pelos operadores, com a data de coleta registrada no código. Blocos do Google Cloud ficam de fora: a VM de um cliente não é "Google" em nenhum sentido útil para um analista, e por isso foram usados só os blocos que não se sobrepõem a `cloud.json`.
+
+### Por que RIPEstat para IPs e RDAP só para domínios
+
+O RDAP também responde sobre IPs, mas o registro do ARIN não traz país e nenhum deles traz o número do AS, que é o que um analista pergunta primeiro. O RIPEstat cobre os dois e atende o mundo todo, não só a região da RIPE.
+
+A geolocalização responde `?` para endereços anycast, como `1.1.1.1`. O país de registro entra como alternativa, mas identificado como tal (`[registered in AU]`), porque "registrado em" e "localizado em" são afirmações diferentes.
+
+---
+
 ## Estratégia de testes
 
-São 212 testes, e nenhum arquivo pcap binário é versionado. Todas as capturas são construídas na hora:
+São 473 testes, e nenhum arquivo pcap binário é versionado. Todas as capturas são construídas na hora:
 
 - **`tests/conftest.py`** monta capturas em memória com Scapy, cobrindo formatos pcap (little/big endian, microssegundos/nanossegundos), pcapng, gzip, arquivo vazio, arquivo de lixo, diretório e captura truncada.
 - **`tests/synth.py`** gera tráfego de ataque sintético: scan vertical e horizontal, beacon regular, beacon com jitter, beacon NTP legítimo (para testar supressão de falso positivo), tunelamento DNS, movimento lateral e upload em massa.
@@ -267,6 +348,8 @@ Duas escolhas valem destaque:
 **O pcapng de teste é montado byte a byte com `struct`** (Section Header Block + Interface Description Block + Enhanced Packet Block). Assim o leitor é validado contra a especificação do formato, e não contra o writer do próprio Scapy — se ambos tivessem o mesmo bug, o teste passaria mesmo assim.
 
 **Os handshakes TLS seguem o mesmo princípio**, construídos conforme o RFC 8446. O parser de TLS é escrito à mão, então testá-lo contra bytes que nós mesmos montamos a partir da especificação é o que dá confiança real.
+
+**Os testes de enriquecimento nunca acessam a internet.** Provedores recebem um transporte falso com respostas no formato real das APIs, e o `urllib_fetch` é testado contra um servidor HTTP em loopback. Os mais importantes verificam invariantes que um analista não consegue conferir lendo um relatório: uma execução padrão não abre sockets, os valores sensíveis não aparecem em nenhuma URL, e reputação não move o score.
 
 Há também testes explícitos de **não-detecção**: um cliente que abre várias conexões estabelecidas não pode virar "port scan"; um beacon NTP não pode receber a mesma confiança de um beacon para porta 4444; tráfego com download dominante não pode virar "exfiltração".
 
@@ -288,6 +371,8 @@ Para capturas muito grandes, algumas estruturas param de crescer enquanto os con
 | `MAX_PEERS_PER_HOST` | 10.000 | `peer_count` vira um piso, sinalizado por `peers_overflow` |
 | `MAX_TRACKED_FLOWS` (TCP) | 400.000 | novos fluxos não entram; `untracked_flows` conta |
 | Bindings ARP / canais ICMP | 50.000 / 100.000 | marcam `tracked_overflow` e `channels_overflow` |
+| `enrich_max_indicators` | 500 por tipo | os menos relevantes saem; `ips_omitted` e `domains_omitted` contam |
+| `enrich_max_listed` | 10 por lista | cada listagem guarda a amostra e o `total` real |
 
 O princípio é sempre o mesmo: **nunca perder informação em silêncio**. Quando um limite é atingido, existe um contador ou uma flag registrando isso.
 
@@ -302,7 +387,9 @@ Os quatro últimos limites de tabela merecem uma nota: eles crescem com a **form
   Detalhe que a passada única obrigou a acertar: o casamento de camadas é por **classe exata**, nunca `isinstance`. O Scapy modela os cabeçalhos citados dentro de um erro ICMP como subclasses dos originais (`TCPerror(TCP)`), e é assim que o `getlayer` se comporta. Um walk com `isinstance` casaria com o `TCPerror` dentro de um *destination unreachable* e reportaria um fluxo TCP fantasma onde havia só um aviso de inalcançabilidade. Há um teste para exatamente esse pacote.
 - **Sem reassembly de streams TCP:** HTTP e TLS são parseados apenas quando os cabeçalhos cabem no primeiro segmento. Mensagens fragmentadas são contadas (`multi_segment_skipped`, `fragmented_hellos`), nunca perdidas em silêncio.
 - **Interno vs externo é heurístico:** faixas RFC 1918, RFC 6598, loopback e link-local são tratadas como internas. Optou-se por faixas explícitas em vez de `ipaddress.is_private` porque versões recentes do Python estenderam esse atributo para todo o registro de propósitos especiais da IANA, incluindo faixas de documentação — o que não corresponde ao conceito de "host na rede monitorada".
-- **Agrupamento de domínio base** usa uma lista curta de sufixos multi-label (`com.br`, `co.uk`, etc.), não a Public Suffix List completa.
+- **Agrupamento de domínio base** usa uma lista curta de sufixos multi-label (`com.br`, `co.uk`, etc.), não a Public Suffix List completa. No `--enrich`, isso significa que `exemplo.co.in` seria consultado como `co.in`: a consulta perde utilidade, mas não expõe nada além do sufixo.
+- **Findings relacionados de um domínio** incluem os do endereço para o qual ele resolveu. É associação, não atribuição: um IP de CDN compartilhado traz findings sobre outros clientes dele, e por isso a coluna se chama "Related findings".
+- **O handshake QUIC não é parsado**, então sessões em UDP/443 não mostram nome de servidor. O relatório avisa quando isso acontece.
 - **Atribuição de bursts** aponta o top talker global, não o talker daquela janela específica — isso exigiria série temporal por origem.
 - **Números de sequência TCP** não tratam wrap-around de 32 bits.
 - **Timestamps** são tratados como epoch UTC; o formato pcap não carrega o fuso horário da máquina que capturou.
